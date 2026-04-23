@@ -1,0 +1,70 @@
+# Polymarket Smart Copy Trading Bot - example config.
+#
+# All thresholds are tunable here without code changes.
+# Secrets (POLYGON_PRIVATE_KEY, CLOB_API_KEY, CLOB_API_SECRET, CLOB_API_PASSPHRASE)
+# come from environment variables, never the config file.
+
+tracker:
+  # Replace with the wallets you actually want to follow (lowercase hex).
+  # Popular public "proxy" wallets for top traders can be sourced from
+  # polymarket analytics dashboards.
+  wallets:
+    - "0x0000000000000000000000000000000000000001"
+    - "0x0000000000000000000000000000000000000002"
+  poll_interval_seconds: 2.0
+  data_api_base: "https://data-api.polymarket.com"
+  max_trade_age_seconds: 30.0
+
+filter:
+  max_price_move_pct: 0.04        # reject if market moved >4% past trader entry
+  min_liquidity_usdc: 2000.0      # top-of-book size, in USDC
+  max_spread_pct: 0.03            # reject if bid/ask spread > 3% of mid
+  min_trader_score: 0.50          # 0.5 is the neutral prior for new traders
+  min_trade_notional: 50.0
+  max_price: 0.97                 # avoid near-certain markets
+  min_price: 0.03
+
+sizing:
+  kelly_fraction: 0.25
+  max_pct_per_trade: 0.03         # 3% of bankroll max per single copy
+  max_pct_per_market: 0.08        # 8% of bankroll max in any one market
+  min_notional: 10.0
+  trader_edge_weight: 0.5
+  max_implied_edge: 0.10          # cap edge estimate at ±10 probability points
+
+risk:
+  weekly_drawdown_stop_pct: 0.30  # hard halt on -30% week
+  daily_soft_stop_pct: 0.10       # no new entries after -10% day
+  trader_drawdown_cutoff_pct: 0.20
+  trader_consecutive_loss_cutoff: 5
+  max_global_exposure_pct: 0.60
+  max_open_positions: 25
+
+execution:
+  clob_base_url: "https://clob.polymarket.com"
+  chain_id: 137                   # Polygon mainnet
+  order_ttl_seconds: 15.0         # how long a limit order lives per attempt
+  repost_count: 2                 # reposts after the first limit
+  repost_step: 0.005              # per-repost nudge toward the opposite side
+  max_slippage_pct: 0.015         # abort if effective fill would be >1.5% off
+  allow_market_orders: false
+  dry_run: true                   # set false once you have a real signer
+
+exit:
+  take_profit_pct: 0.30
+  stop_loss_pct: 0.12
+  mirror_trader_exits: true
+  time_exit_hours_before_resolution: 4.0
+  poll_interval_seconds: 5.0
+
+bankroll:
+  starting_bankroll_usdc: 1000.0
+  reserve_pct: 0.10
+
+logging:
+  level: "INFO"
+  log_file: "logs/bot.log"
+  decisions_file: "logs/decisions.jsonl"
+
+data:
+  db_path: "state/bot_state.sqlite"
