@@ -95,13 +95,23 @@ class ExecutionEngine:
                 reason = f"book_error:{e}"
                 break
 
+            # Pre-flight slippage check: if the side we'd have to cross is
+            # already beyond tolerance, posting a "better" limit only
+            # guarantees it won't fill. Abort early.
+            if signal.side == Side.BUY and book.best_ask > max_price:
+                reason = "slippage_abort"
+                break
+            if signal.side == Side.SELL and book.best_bid < min_price:
+                reason = "slippage_abort"
+                break
+
             limit_price = _compute_limit_price(
                 signal.side, target_price, book, attempt=attempts,
                 step=self._cfg.repost_step,
             )
 
-            # Slippage abort: if even a passive limit can't be placed inside
-            # our tolerance, stop.
+            # Post-compute slippage check: if even the computed limit sits
+            # outside our tolerance, stop.
             if signal.side == Side.BUY and limit_price > max_price:
                 reason = "slippage_abort"
                 break

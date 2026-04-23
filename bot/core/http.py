@@ -16,6 +16,10 @@ import httpx
 log = logging.getLogger(__name__)
 
 
+class _Retryable(Exception):
+    """Internal marker: caller should retry with backoff."""
+
+
 class HttpClient:
     def __init__(self, timeout: float = 10.0, max_retries: int = 3):
         self._client = httpx.AsyncClient(
@@ -38,28 +42,34 @@ class HttpClient:
     ) -> Any:
         attempt = 0
         backoff = 0.4
+        last_response: Optional[httpx.Response] = None
         while True:
             attempt += 1
             try:
                 r = await self._client.request(
                     method, url, params=params, json=json_body, headers=headers
                 )
-                # 5xx / 429 -> retry; other 4xx -> raise immediately
+                last_response = r
+                # 429 / 5xx -> retryable; other 4xx -> raise immediately.
                 if r.status_code == 429 or r.status_code >= 500:
-                    raise httpx.HTTPStatusError(
-                        f"retryable status {r.status_code}",
-                        request=r.request,
-                        response=r,
-                    )
+                    raise _Retryable(f"status {r.status_code}")
+                # raise_for_status() raises HTTPStatusError for 4xx; we let
+                # that propagate without retrying.
                 r.raise_for_status()
                 if not r.content:
                     return None
                 return r.json()
             except (httpx.TimeoutException, httpx.TransportError,
-                    httpx.HTTPStatusError) as e:
+                    _Retryable) as e:
                 if attempt >= self._max_retries:
                     log.warning("HTTP %s %s failed after %d attempts: %s",
                                 method, url, attempt, e)
+                    if last_response is not None:
+                        raise httpx.HTTPStatusError(
+                            str(e),
+                            request=last_response.request,
+                            response=last_response,
+                        ) from e
                     raise
                 jitter = random.uniform(0, backoff * 0.3)
                 await asyncio.sleep(backoff + jitter)

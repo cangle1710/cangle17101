@@ -169,10 +169,12 @@ class Orchestrator:
             self._reject(signal, risk_check.reason, **risk_check.detail)
             return
 
-        # 7. Execute.
+        # 7. Execute. Anchor slippage tolerance on the trader's entry
+        # price, not the current reference — otherwise any subsequent book
+        # move would be measured against itself.
         result = await self._execution.execute(
             signal, target_shares=sizing.shares,
-            target_price=sizing.limit_price,
+            target_price=signal.price,
         )
         for o in result.orders:
             await self._store.upsert_order(o)
