@@ -61,6 +61,21 @@ class RiskManager:
         # wallet -> reason when cut off
         self._trader_cutoffs: dict[str, str] = {}
 
+    def hydrate(
+        self,
+        *,
+        global_halt_reason: Optional[str] = None,
+        cutoffs: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Restore persisted state on startup."""
+        if global_halt_reason:
+            self._global_halt = True
+            self._halt_reason = global_halt_reason
+            log.warning("Restored global halt: %s", global_halt_reason)
+        for w, r in (cutoffs or {}).items():
+            self._trader_cutoffs[w.lower()] = r
+            log.warning("Restored trader cutoff %s: %s", w, r)
+
     # ----- state mutation -----
 
     def trip_global(self, reason: str) -> None:

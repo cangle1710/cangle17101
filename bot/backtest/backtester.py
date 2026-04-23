@@ -114,8 +114,11 @@ class Backtester:
 
             # Assume instant fill at the limit price (simplification; see
             # module docstring for how to make this realistic).
+            # Deterministic ids / timestamps so replays are byte-identical.
             await self._portfolio.open_from_signal(
                 sig, entry_price=sizing.limit_price, size=sizing.shares,
+                position_id=f"{sig.signal_id}::pos",
+                opened_at=sig.timestamp,
             )
             res.trades_copied += 1
 
@@ -124,23 +127,37 @@ class Backtester:
                 await self._settle_at_resolution(
                     token_id=sig.token_id,
                     resolved_to_yes=h.resolved_to,
+                    closed_at=float(h.resolution_ts),
                 )
 
         # Force-close anything still open at the end: mark-to-entry.
-        for p in list(self._portfolio.open_positions()):
-            await self._portfolio.close(p.position_id, exit_price=p.entry_price)
+        # Sort by position_id to make the closing order deterministic across
+        # replays (dict iteration order depends on insertion, which is
+        # already stable, but sorting makes the invariant explicit).
+        leftover = sorted(self._portfolio.open_positions(),
+                          key=lambda p: p.position_id)
+        for p in leftover:
+            await self._portfolio.close(
+                p.position_id, exit_price=p.entry_price,
+                closed_at=p.opened_at,
+            )
 
         res.final_equity = self._portfolio.current_equity()
         res.realized_pnl = self._portfolio.realized_pnl
         return res
 
     async def _settle_at_resolution(
-        self, *, token_id: str, resolved_to_yes: bool
+        self, *, token_id: str, resolved_to_yes: bool,
+        closed_at: Optional[float] = None,
     ) -> None:
         """When a market resolves, YES shares pay 1 USDC, NO shares pay 0
         (and vice versa). Any still-open position in this token settles at
         the terminal price."""
-        for p in list(self._portfolio.positions_by_token(token_id)):
+        targets = sorted(
+            self._portfolio.positions_by_token(token_id),
+            key=lambda p: p.position_id,
+        )
+        for p in targets:
             yes_wins = resolved_to_yes
             my_outcome_wins = (
                 (p.outcome.name == "YES" and yes_wins)
@@ -148,4 +165,6 @@ class Backtester:
             )
             terminal = 1.0 if my_outcome_wins else 0.0
             # Closing a BUY at 1.0 is a win. Closing a BUY at 0.0 is a loss.
-            await self._portfolio.close(p.position_id, exit_price=terminal)
+            await self._portfolio.close(
+                p.position_id, exit_price=terminal, closed_at=closed_at,
+            )

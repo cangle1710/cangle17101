@@ -71,7 +71,15 @@ class TraderScorer:
             s.equity_curve = s.equity_curve[-2000:]
 
         s.peak_equity = max(s.peak_equity, new_equity)
-        dd = (s.peak_equity - new_equity) / s.peak_equity if s.peak_equity > 0 else 0.0
+        # DD = peak-to-trough distance normalized by the wider of:
+        #   - the peak (so a winner who gives back half is 0.5 DD)
+        #   - the absolute trough (so a pure loser at -100 w/ peak 0 is 1.0 DD)
+        #   - 1.0 (guards against division by zero on trade 1)
+        # Seeding peak at 0 anchors DD to "starting capital", which matches
+        # the intuition that a trader who only loses money is at 100% DD.
+        trough = min(s.equity_curve + [0.0])
+        denom = max(s.peak_equity, abs(trough), 1.0)
+        dd = max(0.0, s.peak_equity - new_equity) / denom
         s.max_drawdown = max(s.max_drawdown, dd)
 
         r = pnl / notional if notional > 0 else 0.0

@@ -14,12 +14,39 @@ from typing import Any
 import yaml
 
 
+def _check_range(name: str, value: float, *, low: float, high: float,
+                 inclusive_low: bool = True, inclusive_high: bool = True) -> None:
+    lo_ok = value >= low if inclusive_low else value > low
+    hi_ok = value <= high if inclusive_high else value < high
+    if not (lo_ok and hi_ok):
+        raise ValueError(
+            f"config: {name}={value!r} out of range "
+            f"[{low}, {high}]"
+        )
+
+
+def _check_nonneg(name: str, value: float) -> None:
+    if value < 0:
+        raise ValueError(f"config: {name}={value!r} must be >= 0")
+
+
+def _check_positive(name: str, value: float) -> None:
+    if value <= 0:
+        raise ValueError(f"config: {name}={value!r} must be > 0")
+
+
 @dataclass
 class TrackerConfig:
     wallets: list[str]
     poll_interval_seconds: float = 2.0
     data_api_base: str = "https://data-api.polymarket.com"
     max_trade_age_seconds: float = 30.0
+
+    def __post_init__(self):
+        if not self.wallets:
+            raise ValueError("config.tracker.wallets: must not be empty")
+        _check_positive("tracker.poll_interval_seconds", self.poll_interval_seconds)
+        _check_positive("tracker.max_trade_age_seconds", self.max_trade_age_seconds)
 
 
 @dataclass
@@ -31,6 +58,19 @@ class FilterConfig:
     min_trade_notional: float = 50.0  # ignore dust trades
     max_price: float = 0.97  # avoid near-resolved markets
     min_price: float = 0.03
+
+    def __post_init__(self):
+        _check_range("filter.max_price_move_pct", self.max_price_move_pct, low=0, high=1)
+        _check_nonneg("filter.min_liquidity_usdc", self.min_liquidity_usdc)
+        _check_range("filter.max_spread_pct", self.max_spread_pct, low=0, high=1)
+        _check_range("filter.min_trader_score", self.min_trader_score, low=0, high=1)
+        _check_nonneg("filter.min_trade_notional", self.min_trade_notional)
+        _check_range("filter.min_price", self.min_price, low=0, high=1)
+        _check_range("filter.max_price", self.max_price, low=0, high=1)
+        if self.min_price >= self.max_price:
+            raise ValueError(
+                f"filter.min_price ({self.min_price}) must be < max_price ({self.max_price})"
+            )
 
 
 @dataclass
@@ -44,6 +84,19 @@ class SizingConfig:
     trader_edge_weight: float = 0.5
     max_implied_edge: float = 0.10
 
+    def __post_init__(self):
+        _check_range("sizing.kelly_fraction", self.kelly_fraction, low=0, high=1)
+        _check_range("sizing.max_pct_per_trade", self.max_pct_per_trade, low=0, high=1)
+        _check_range("sizing.max_pct_per_market", self.max_pct_per_market, low=0, high=1)
+        _check_nonneg("sizing.min_notional", self.min_notional)
+        _check_range("sizing.trader_edge_weight", self.trader_edge_weight, low=0, high=1)
+        _check_range("sizing.max_implied_edge", self.max_implied_edge, low=0, high=0.5)
+        if self.max_pct_per_trade > self.max_pct_per_market:
+            raise ValueError(
+                f"sizing.max_pct_per_trade ({self.max_pct_per_trade}) must "
+                f"not exceed max_pct_per_market ({self.max_pct_per_market})"
+            )
+
 
 @dataclass
 class RiskConfig:
@@ -53,6 +106,16 @@ class RiskConfig:
     trader_consecutive_loss_cutoff: int = 5
     max_global_exposure_pct: float = 0.60
     max_open_positions: int = 25
+
+    def __post_init__(self):
+        _check_range("risk.weekly_drawdown_stop_pct", self.weekly_drawdown_stop_pct, low=0, high=1)
+        _check_range("risk.daily_soft_stop_pct", self.daily_soft_stop_pct, low=0, high=1)
+        _check_range("risk.trader_drawdown_cutoff_pct", self.trader_drawdown_cutoff_pct, low=0, high=1)
+        if self.trader_consecutive_loss_cutoff < 1:
+            raise ValueError("risk.trader_consecutive_loss_cutoff must be >= 1")
+        _check_range("risk.max_global_exposure_pct", self.max_global_exposure_pct, low=0, high=1)
+        if self.max_open_positions < 1:
+            raise ValueError("risk.max_open_positions must be >= 1")
 
 
 @dataclass
@@ -66,6 +129,14 @@ class ExecutionConfig:
     allow_market_orders: bool = False
     dry_run: bool = True
 
+    def __post_init__(self):
+        _check_positive("execution.order_ttl_seconds", self.order_ttl_seconds)
+        if self.repost_count < 0:
+            raise ValueError("execution.repost_count must be >= 0")
+        _check_range("execution.repost_step", self.repost_step, low=0, high=0.5)
+        # 10% slippage is already egregious; 25% is absurd. Bound defensively.
+        _check_range("execution.max_slippage_pct", self.max_slippage_pct, low=0, high=0.25)
+
 
 @dataclass
 class ExitConfig:
@@ -75,11 +146,23 @@ class ExitConfig:
     time_exit_hours_before_resolution: float = 4.0
     poll_interval_seconds: float = 5.0
 
+    def __post_init__(self):
+        _check_positive("exit.take_profit_pct", self.take_profit_pct)
+        _check_positive("exit.stop_loss_pct", self.stop_loss_pct)
+        _check_nonneg("exit.time_exit_hours_before_resolution",
+                      self.time_exit_hours_before_resolution)
+        _check_positive("exit.poll_interval_seconds", self.poll_interval_seconds)
+
 
 @dataclass
 class BankrollConfig:
     starting_bankroll_usdc: float = 1000.0
     reserve_pct: float = 0.10  # never deploy last 10%
+
+    def __post_init__(self):
+        _check_positive("bankroll.starting_bankroll_usdc", self.starting_bankroll_usdc)
+        _check_range("bankroll.reserve_pct", self.reserve_pct, low=0, high=1,
+                     inclusive_high=False)
 
 
 @dataclass

@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS processed_trades (
     key TEXT PRIMARY KEY,
     seen_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS kv_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trader_cutoffs (
+    wallet TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    set_at REAL NOT NULL
+);
 """
 
 
@@ -223,8 +235,13 @@ class DataStore:
         await self._run(self._upsert_position_sync, position)
 
     def _load_open_positions_sync(self) -> list[Position]:
+        # Deterministic order: opened_at first, then position_id. Lets
+        # callers (including the Backtester and test replays) iterate in
+        # a predictable sequence regardless of SQLite's row layout.
         cur = self._conn.execute(
-            "SELECT * FROM positions WHERE status = ?", (PositionStatus.OPEN.value,)
+            "SELECT * FROM positions WHERE status = ? "
+            "ORDER BY opened_at ASC, position_id ASC",
+            (PositionStatus.OPEN.value,),
         )
         out = [_row_to_position(r) for r in cur.fetchall()]
         cur.close()
@@ -307,6 +324,72 @@ class DataStore:
 
     async def equity_since(self, since: float) -> list[tuple[float, float]]:
         return await self._run(self._equity_since_sync, since)
+
+    # ----- kv_state (anchors, halts) -----
+
+    def _kv_set_sync(self, key: str, value: str) -> None:
+        with self._tx() as cur:
+            cur.execute(
+                """INSERT INTO kv_state(key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, time.time()),
+            )
+
+    async def kv_set(self, key: str, value: str) -> None:
+        await self._run(self._kv_set_sync, key, value)
+
+    def _kv_get_sync(self, key: str) -> Optional[str]:
+        cur = self._conn.execute(
+            "SELECT value FROM kv_state WHERE key = ?", (key,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row["value"] if row else None
+
+    async def kv_get(self, key: str) -> Optional[str]:
+        return await self._run(self._kv_get_sync, key)
+
+    def _kv_delete_sync(self, key: str) -> None:
+        with self._tx() as cur:
+            cur.execute("DELETE FROM kv_state WHERE key = ?", (key,))
+
+    async def kv_delete(self, key: str) -> None:
+        await self._run(self._kv_delete_sync, key)
+
+    # ----- trader_cutoffs -----
+
+    def _add_cutoff_sync(self, wallet: str, reason: str) -> None:
+        with self._tx() as cur:
+            cur.execute(
+                """INSERT INTO trader_cutoffs(wallet, reason, set_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(wallet) DO UPDATE SET
+                     reason=excluded.reason, set_at=excluded.set_at""",
+                (wallet.lower(), reason, time.time()),
+            )
+
+    async def add_cutoff(self, wallet: str, reason: str) -> None:
+        await self._run(self._add_cutoff_sync, wallet, reason)
+
+    def _remove_cutoff_sync(self, wallet: str) -> None:
+        with self._tx() as cur:
+            cur.execute(
+                "DELETE FROM trader_cutoffs WHERE wallet = ?", (wallet.lower(),)
+            )
+
+    async def remove_cutoff(self, wallet: str) -> None:
+        await self._run(self._remove_cutoff_sync, wallet)
+
+    def _load_cutoffs_sync(self) -> dict[str, str]:
+        cur = self._conn.execute("SELECT wallet, reason FROM trader_cutoffs")
+        out = {r["wallet"]: r["reason"] for r in cur.fetchall()}
+        cur.close()
+        return out
+
+    async def load_cutoffs(self) -> dict[str, str]:
+        return await self._run(self._load_cutoffs_sync)
 
     async def close(self) -> None:
         async with self._lock:

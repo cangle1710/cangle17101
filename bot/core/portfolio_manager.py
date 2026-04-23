@@ -50,6 +50,42 @@ class PortfolioManager:
         open_positions = await self._store.load_open_positions()
         for p in open_positions:
             self._positions[p.position_id] = p
+        # Restore day/week equity anchors if we've written them before.
+        # If not, anchor to whatever equity we're restarting with (not the
+        # starting bankroll, which may be stale).
+        import json
+        raw = await self._store.kv_get("equity_anchors")
+        if raw:
+            try:
+                a = json.loads(raw)
+                self._sod_ts = float(a.get("sod_ts", self._sod_ts))
+                self._sow_ts = float(a.get("sow_ts", self._sow_ts))
+                self._start_of_day_equity = float(
+                    a.get("sod_equity", self.current_equity()))
+                self._start_of_week_equity = float(
+                    a.get("sow_equity", self.current_equity()))
+                log.info(
+                    "Restored equity anchors: sod=%.2f sow=%.2f",
+                    self._start_of_day_equity, self._start_of_week_equity,
+                )
+            except (ValueError, TypeError):
+                log.warning("Failed to parse persisted anchors; reseeding")
+                self._start_of_day_equity = self.current_equity()
+                self._start_of_week_equity = self.current_equity()
+        else:
+            # Fresh bot or legacy DB: anchor to current equity so the daily
+            # stop doesn't fire spuriously after a crashed restart.
+            self._start_of_day_equity = self.current_equity()
+            self._start_of_week_equity = self.current_equity()
+
+    async def persist_anchors(self) -> None:
+        import json
+        await self._store.kv_set("equity_anchors", json.dumps({
+            "sod_ts": self._sod_ts,
+            "sow_ts": self._sow_ts,
+            "sod_equity": self._start_of_day_equity,
+            "sow_equity": self._start_of_week_equity,
+        }))
 
     # ----- position lifecycle -----
 
@@ -59,9 +95,17 @@ class PortfolioManager:
         *,
         entry_price: float,
         size: float,
+        position_id: Optional[str] = None,
+        opened_at: Optional[float] = None,
     ) -> Position:
-        position = Position(
-            position_id=str(uuid.uuid4()),
+        """Open a position from a trade signal.
+
+        Callers that need deterministic replay (e.g. Backtester) can supply
+        an explicit `position_id` and `opened_at`. Live usage leaves them
+        None and gets a uuid + wall-clock time.
+        """
+        pos_kwargs: dict = dict(
+            position_id=position_id if position_id is not None else str(uuid.uuid4()),
             signal_id=signal.signal_id,
             source_wallet=signal.wallet,
             market_id=signal.market_id,
@@ -71,6 +115,9 @@ class PortfolioManager:
             entry_price=entry_price,
             size=size,
         )
+        if opened_at is not None:
+            pos_kwargs["opened_at"] = opened_at
+        position = Position(**pos_kwargs)
         self._positions[position.position_id] = position
         await self._store.upsert_position(position)
         log.info("opened position %s: %s %.2f @ %.4f (wallet=%s, market=%s)",
@@ -84,6 +131,7 @@ class PortfolioManager:
         *,
         exit_price: float,
         size: Optional[float] = None,
+        closed_at: Optional[float] = None,
     ) -> Optional[Position]:
         p = self._positions.get(position_id)
         if p is None:
@@ -102,7 +150,7 @@ class PortfolioManager:
 
         if close_size >= p.size - 1e-9:
             p.status = PositionStatus.CLOSED
-            p.closed_at = time.time()
+            p.closed_at = closed_at if closed_at is not None else time.time()
             p.exit_price = exit_price
             self._positions.pop(position_id, None)
         else:

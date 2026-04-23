@@ -27,11 +27,18 @@ aliases.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 from .models import Outcome, Side, TradeSignal
 
 log = logging.getLogger(__name__)
+
+
+def _finite(x: float) -> bool:
+    """Reject NaN / ±Inf. NaN comparisons all yield False, so downstream
+    bounds checks would let garbage through silently."""
+    return math.isfinite(x)
 
 
 def _first(d: dict, *keys, default=None):
@@ -83,6 +90,8 @@ def parse_trade(raw: dict[str, Any], *, wallet_hint: Optional[str] = None) -> Op
         price_f = float(price)
         size_f = float(size)
         ts_f = float(ts)
+        if not (_finite(price_f) and _finite(size_f) and _finite(ts_f)):
+            return None
         # Some APIs return ms timestamps; normalize to seconds.
         if ts_f > 10_000_000_000:
             ts_f /= 1000.0

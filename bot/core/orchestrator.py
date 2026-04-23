@@ -76,13 +76,19 @@ class Orchestrator:
 
         # Cache of recent "sell" signals per (wallet, token) so the exit
         # loop can mirror trader exits even if they arrive between polls.
+        # TTL-bounded to prevent unbounded growth over long uptimes.
         self._trader_sells: dict[tuple[str, str], float] = {}
+        # Keep sells for 24h; exits happen within minutes/hours typically.
+        self._trader_sells_ttl_seconds: float = 24 * 3600.0
 
     async def run(self) -> None:
         self._running = True
         await self._portfolio.hydrate()
         stats_list = await self._store.load_all_trader_stats()
         self._scorer.hydrate(stats_list)
+        cutoffs = await self._store.load_cutoffs()
+        halt = await self._store.kv_get("global_halt_reason")
+        self._risk.hydrate(global_halt_reason=halt, cutoffs=cutoffs)
 
         tasks = [
             asyncio.create_task(self._entry_loop(), name="entry_loop"),
@@ -301,6 +307,8 @@ class Orchestrator:
             )
             await self._store.upsert_trader_stats(stats)
             cutoff = self._risk.evaluate_trader_stats(stats)
+            if cutoff is not None:
+                await self._store.add_cutoff(closed.source_wallet, cutoff)
 
             self._decisions.record(
                 "exit",
@@ -316,13 +324,26 @@ class Orchestrator:
         ts = self._trader_sells.get((wallet, token_id))
         return ts is not None and ts >= after
 
+    def _evict_stale_trader_sells(self, now: float) -> None:
+        cutoff = now - self._trader_sells_ttl_seconds
+        stale = [k for k, ts in self._trader_sells.items() if ts < cutoff]
+        for k in stale:
+            del self._trader_sells[k]
+
     # ----------------- MAINTENANCE LOOP -----------------
 
     async def _maintenance_loop(self) -> None:
         while self._running:
             try:
+                self._evict_stale_trader_sells(time.time())
                 self._portfolio.roll_anchors()
+                await self._portfolio.persist_anchors()
+                was_halted = self._risk.global_halted
                 self._risk.evaluate_portfolio(self._portfolio.risk_snapshot())
+                if self._risk.global_halted and not was_halted:
+                    await self._store.kv_set(
+                        "global_halt_reason", self._risk._halt_reason or "tripped",
+                    )
                 await self._store.append_equity(self._portfolio.current_equity())
             except Exception:
                 log.exception("maintenance loop error")

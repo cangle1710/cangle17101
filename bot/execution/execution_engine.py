@@ -180,17 +180,22 @@ class ExecutionEngine:
         if placed.status == "FILLED":
             return placed
 
-        # Poll until TTL elapses or order fills.
-        deadline = time.time() + self._cfg.order_ttl_seconds
-        while time.time() < deadline:
-            await asyncio.sleep(0.5)
+        # Poll until TTL elapses or order fills. Use monotonic clock so
+        # NTP jumps don't skew the deadline, and cap sleep at the remaining
+        # TTL so short TTLs still get at least one poll.
+        poll_cadence = 0.5
+        deadline = time.monotonic() + self._cfg.order_ttl_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return placed
+            await asyncio.sleep(min(poll_cadence, max(0.0, remaining)))
             refreshed = await self._clob.get_order(placed.order_id)
             if refreshed is None:
                 continue
             if refreshed.status in {"FILLED", "CANCELED", "EXPIRED"}:
                 return refreshed
             placed = refreshed
-        return placed
 
 
 def _compute_limit_price(
