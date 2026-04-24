@@ -54,12 +54,17 @@ class RiskDecision:
 
 
 class RiskManager:
-    def __init__(self, config: RiskConfig):
+    def __init__(self, config: RiskConfig, *, kill_switch_file: Optional[str] = None):
         self._cfg = config
         self._global_halt = False
         self._halt_reason: Optional[str] = None
         # wallet -> reason when cut off
         self._trader_cutoffs: dict[str, str] = {}
+        # Path checked on every entry; if it exists, trading is paused.
+        # Note: this is *not* a persisted global_halt (which requires
+        # operator action in the DB to clear). It's a soft pause controlled
+        # from outside the process.
+        self._kill_switch_file = kill_switch_file or None
 
     def hydrate(
         self,
@@ -98,6 +103,12 @@ class RiskManager:
     def trader_is_cutoff(self, wallet: str) -> bool:
         return wallet.lower() in self._trader_cutoffs
 
+    def cutoff_count(self) -> int:
+        return len(self._trader_cutoffs)
+
+    def cutoffs(self) -> dict[str, str]:
+        return dict(self._trader_cutoffs)
+
     @property
     def global_halted(self) -> bool:
         return self._global_halt
@@ -127,13 +138,25 @@ class RiskManager:
 
     # ----- entry gate -----
 
+    def kill_switch_active(self) -> bool:
+        if not self._kill_switch_file:
+            return False
+        import os
+        return os.path.exists(self._kill_switch_file)
+
     def check_entry(
         self,
         *,
         wallet: str,
         proposed_notional: float,
         snap: RiskSnapshot,
+        group: Optional[str] = None,
+        group_exposure: float = 0.0,
     ) -> RiskDecision:
+        if self.kill_switch_active():
+            return RiskDecision.deny(
+                "kill_switch_file", path=self._kill_switch_file,
+            )
         if self._global_halt:
             return RiskDecision.deny(
                 "global_halt", halt_reason=self._halt_reason,
@@ -165,6 +188,18 @@ class RiskManager:
                 return RiskDecision.deny(
                     "global_exposure_cap",
                     projected=projected_exposure, cap=max_exposure,
+                )
+
+        # Correlation-group cap: if the caller has classified this signal
+        # into a group with other open positions, ensure projected
+        # per-group notional stays below the configured fraction.
+        if group is not None and snap.bankroll > 0:
+            group_cap = snap.bankroll * self._cfg.max_pct_per_correlation_group
+            projected_group = group_exposure + proposed_notional
+            if projected_group > group_cap:
+                return RiskDecision.deny(
+                    "correlation_group_cap",
+                    group=group, projected=projected_group, cap=group_cap,
                 )
 
         return RiskDecision.allow()

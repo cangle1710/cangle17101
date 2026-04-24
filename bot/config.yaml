@@ -68,3 +68,37 @@ logging:
 
 data:
   db_path: "state/bot_state.sqlite"
+
+observability:
+  enabled: true
+  host: "127.0.0.1"
+  port: 9090
+
+safety:
+  # Operator kill-switch: if this file exists, all new entries are blocked
+  # on every check_entry. Leave as empty string to disable.
+  kill_switch_file: ""
+  # Pause before live trading starts so you can Ctrl+C if dry_run was left
+  # off by mistake. Set to 0 to skip.
+  live_mode_confirm_delay_seconds: 5.0
+
+scoring:
+  # "composite" (ROI + WR + Sharpe + DD penalty) or "bayesian" (Beta
+  # posterior LCB on win rate — Thompson-style exploration of new traders).
+  mode: "composite"
+  bayesian_prior_alpha: 1.0
+  bayesian_prior_beta: 1.0
+  bayesian_lcb_stdev: 1.0
+
+aggregation:
+  # When N>=threshold distinct tracked wallets hit the same market within
+  # window_seconds, we emit a decision-journal `signal_cluster` event.
+  # Observability-only today; wire your strategy to it.
+  cluster_threshold: 2
+  cluster_window_seconds: 300.0
+
+adverse_selection:
+  # After a fill, sample the book this many seconds later and compare to
+  # the fill price. Recorded per-market so you can spot picked-off flow.
+  enabled: true
+  check_after_seconds: 30.0

@@ -106,6 +106,16 @@ class RiskConfig:
     trader_consecutive_loss_cutoff: int = 5
     max_global_exposure_pct: float = 0.60
     max_open_positions: int = 25
+    # Optional: correlation-aware exposure caps. Map of group name ->
+    # max fraction of bankroll allocatable to tokens in that group.
+    # Tokens are assigned to groups via `correlation_groups` (below).
+    # Prediction markets frequently cluster (40 token_ids for one event),
+    # and per-token caps don't catch this.
+    max_pct_per_correlation_group: float = 0.20
+    # Maps token_id -> group name. Any token not in the map falls into
+    # its own singleton group (i.e. cap is effectively per-token). This
+    # field comes through the YAML as a plain dict.
+    correlation_groups: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         _check_range("risk.weekly_drawdown_stop_pct", self.weekly_drawdown_stop_pct, low=0, high=1)
@@ -116,6 +126,8 @@ class RiskConfig:
         _check_range("risk.max_global_exposure_pct", self.max_global_exposure_pct, low=0, high=1)
         if self.max_open_positions < 1:
             raise ValueError("risk.max_open_positions must be >= 1")
+        _check_range("risk.max_pct_per_correlation_group",
+                     self.max_pct_per_correlation_group, low=0, high=1)
 
 
 @dataclass
@@ -155,6 +167,54 @@ class ExitConfig:
 
 
 @dataclass
+class ScoringConfig:
+    # Scoring regime: "composite" (default, matches the original
+    # TraderScorer.score) or "bayesian" (Beta-posterior lower confidence
+    # bound, Thompson-style exploration).
+    mode: str = "composite"
+    # For bayesian mode: prior Beta(alpha, beta).
+    bayesian_prior_alpha: float = 1.0
+    bayesian_prior_beta: float = 1.0
+    # Lower-confidence-bound multiplier (0 = mean, 1 = 1 stdev below mean).
+    # Higher = more conservative.
+    bayesian_lcb_stdev: float = 1.0
+
+    def __post_init__(self):
+        if self.mode not in ("composite", "bayesian"):
+            raise ValueError(f"scoring.mode must be 'composite' or 'bayesian', got {self.mode!r}")
+        _check_positive("scoring.bayesian_prior_alpha", self.bayesian_prior_alpha)
+        _check_positive("scoring.bayesian_prior_beta", self.bayesian_prior_beta)
+        _check_nonneg("scoring.bayesian_lcb_stdev", self.bayesian_lcb_stdev)
+
+
+@dataclass
+class AggregationConfig:
+    # If N>=threshold distinct tracked wallets hit the same market_id
+    # within `window_seconds`, we treat the signal as a "cluster" and
+    # emit a decision-journal event. Currently observability-only; tune
+    # PositionSizer via sizing.max_implied_edge if you want it to act on it.
+    cluster_threshold: int = 2
+    cluster_window_seconds: float = 300.0
+
+    def __post_init__(self):
+        if self.cluster_threshold < 1:
+            raise ValueError("aggregation.cluster_threshold must be >= 1")
+        _check_positive("aggregation.cluster_window_seconds", self.cluster_window_seconds)
+
+
+@dataclass
+class AdverseSelectionConfig:
+    # After a fill, sample the book at `check_after_seconds` and compare
+    # to fill price; emit a metric and a decision event. Observability-only.
+    enabled: bool = True
+    check_after_seconds: float = 30.0
+
+    def __post_init__(self):
+        _check_positive("adverse_selection.check_after_seconds",
+                        self.check_after_seconds)
+
+
+@dataclass
 class BankrollConfig:
     starting_bankroll_usdc: float = 1000.0
     reserve_pct: float = 0.10  # never deploy last 10%
@@ -173,6 +233,32 @@ class LoggingConfig:
 
 
 @dataclass
+class ObservabilityConfig:
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 9090
+
+    def __post_init__(self):
+        if self.port < 0 or self.port > 65535:
+            raise ValueError(f"observability.port out of range: {self.port}")
+
+
+@dataclass
+class SafetyConfig:
+    # If this file path exists on disk, all new entries are blocked. Ops
+    # teams can `touch` it to instantly halt trading without attaching a
+    # debugger. Set to empty string to disable.
+    kill_switch_file: str = ""
+    # How long main.py pauses before starting the live bot — gives the
+    # operator time to Ctrl+C if they accidentally left dry_run off.
+    live_mode_confirm_delay_seconds: float = 5.0
+
+    def __post_init__(self):
+        _check_nonneg("safety.live_mode_confirm_delay_seconds",
+                      self.live_mode_confirm_delay_seconds)
+
+
+@dataclass
 class DataConfig:
     db_path: str = "bot_state.sqlite"
 
@@ -188,6 +274,11 @@ class BotConfig:
     bankroll: BankrollConfig
     logging: LoggingConfig
     data: DataConfig
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    aggregation: AggregationConfig = field(default_factory=AggregationConfig)
+    adverse_selection: AdverseSelectionConfig = field(default_factory=AdverseSelectionConfig)
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -213,12 +304,18 @@ def load_config(path: str | Path) -> BotConfig:
         risk=_build(raw.get("risk"), RiskConfig),
         execution=_build(raw.get("execution"), ExecutionConfig),
         exit=_build(raw.get("exit"), ExitConfig),
+        observability=_build(raw.get("observability"), ObservabilityConfig),
+        safety=_build(raw.get("safety"), SafetyConfig),
+        scoring=_build(raw.get("scoring"), ScoringConfig),
+        aggregation=_build(raw.get("aggregation"), AggregationConfig),
+        adverse_selection=_build(raw.get("adverse_selection"), AdverseSelectionConfig),
         bankroll=_build(raw.get("bankroll"), BankrollConfig),
         logging=_build(raw.get("logging"), LoggingConfig),
         data=_build(raw.get("data"), DataConfig),
         extras={k: v for k, v in raw.items() if k not in {
             "tracker", "filter", "sizing", "risk", "execution",
-            "exit", "bankroll", "logging", "data"
+            "exit", "bankroll", "logging", "data", "observability", "safety",
+            "scoring", "aggregation", "adverse_selection",
         }},
     )
 

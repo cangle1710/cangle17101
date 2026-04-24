@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from .core.config import load_config
+from .core.enhancements import AdverseSelectionObserver, SignalAggregator
 from .core.exit_manager import ExitManager
 from .core.http import HttpClient
 from .core.logging_setup import DecisionLogger, setup_logging
@@ -25,7 +26,49 @@ from .core.trader_scorer import TraderScorer
 from .core.wallet_tracker import WalletTracker
 from .data import DataStore
 from .execution import ClobClient, ExecutionEngine
+from .observability import ObservabilityServer, registry
 from .risk import RiskManager
+
+
+_DRY_RUN_BANNER = """
+================================================================================
+  PAPER TRADING (dry_run: true) - NO REAL ORDERS WILL BE SUBMITTED
+================================================================================
+"""
+
+_LIVE_BANNER = """
+================================================================================
+  !!!  LIVE TRADING (dry_run: false) - REAL CAPITAL AT RISK  !!!
+  Starting in {delay:.0f}s. Press Ctrl+C now to abort.
+================================================================================
+"""
+
+
+async def _announce_mode(cfg, log: logging.Logger) -> None:
+    if cfg.execution.dry_run:
+        log.warning(_DRY_RUN_BANNER)
+        return
+    delay = max(0.0, cfg.safety.live_mode_confirm_delay_seconds)
+    log.warning(_LIVE_BANNER.format(delay=delay))
+    if delay > 0:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+
+
+async def _ready_probe_factory(orch: "Orchestrator", store: "DataStore"):
+    async def probe() -> tuple[bool, str]:
+        # Ready = orchestrator is running, DB accepts writes.
+        if not orch._running:  # type: ignore[attr-defined]
+            return False, "orchestrator not running"
+        try:
+            # Lightweight read to confirm the store is alive.
+            await store.kv_get("readyz_probe")
+        except Exception as e:  # noqa: BLE001
+            return False, f"datastore error: {e}"
+        return True, "ready"
+    return probe
 
 
 async def _amain(config_path: Path) -> int:
@@ -35,13 +78,20 @@ async def _amain(config_path: Path) -> int:
     log.info("loaded config from %s", config_path)
     log.info("dry_run=%s wallets=%d", cfg.execution.dry_run, len(cfg.tracker.wallets))
 
+    await _announce_mode(cfg, log)
+
     store = DataStore(cfg.data.db_path)
     http = HttpClient()
 
-    scorer = TraderScorer()
+    scorer = TraderScorer(
+        mode=cfg.scoring.mode,
+        bayesian_prior_alpha=cfg.scoring.bayesian_prior_alpha,
+        bayesian_prior_beta=cfg.scoring.bayesian_prior_beta,
+        bayesian_lcb_stdev=cfg.scoring.bayesian_lcb_stdev,
+    )
     sig_filter = SignalFilter(cfg.filter, scorer)
     sizer = PositionSizer(cfg.sizing, scorer)
-    risk = RiskManager(cfg.risk)
+    risk = RiskManager(cfg.risk, kill_switch_file=cfg.safety.kill_switch_file or None)
     portfolio = PortfolioManager(cfg.bankroll, store)
     exit_mgr = ExitManager(cfg.exit)
 
@@ -51,13 +101,38 @@ async def _amain(config_path: Path) -> int:
 
     decisions = DecisionLogger(cfg.logging.decisions_file)
 
+    aggregator = SignalAggregator(
+        cluster_threshold=cfg.aggregation.cluster_threshold,
+        window_seconds=cfg.aggregation.cluster_window_seconds,
+        decisions=decisions,
+    )
+    adverse_selection = None
+    if cfg.adverse_selection.enabled:
+        adverse_selection = AdverseSelectionObserver(
+            check_after_seconds=cfg.adverse_selection.check_after_seconds,
+            clob=clob,
+            decisions=decisions,
+        )
+
     orch = Orchestrator(
         cfg,
         http=http, store=store, tracker=tracker, scorer=scorer,
         filter_=sig_filter, sizer=sizer, risk=risk, portfolio=portfolio,
         clob=clob, execution=execution, exit_mgr=exit_mgr,
         decisions=decisions,
+        aggregator=aggregator,
+        adverse_selection=adverse_selection,
     )
+
+    obs_server: ObservabilityServer | None = None
+    if cfg.observability.enabled:
+        obs_server = ObservabilityServer(
+            registry,
+            host=cfg.observability.host,
+            port=cfg.observability.port,
+            ready_probe=await _ready_probe_factory(orch, store),
+        )
+        await obs_server.start()
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -79,6 +154,8 @@ async def _amain(config_path: Path) -> int:
     except asyncio.CancelledError:
         pass
     finally:
+        if obs_server is not None:
+            await obs_server.stop()
         await http.close()
         await store.close()
     return 0
