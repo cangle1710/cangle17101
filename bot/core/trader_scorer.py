@@ -28,10 +28,23 @@ log = logging.getLogger(__name__)
 
 
 class TraderScorer:
-    def __init__(self, *, min_trades_for_score: int = 10):
+    def __init__(
+        self,
+        *,
+        min_trades_for_score: int = 10,
+        mode: str = "composite",
+        bayesian_prior_alpha: float = 1.0,
+        bayesian_prior_beta: float = 1.0,
+        bayesian_lcb_stdev: float = 1.0,
+    ):
         self._stats: dict[str, TraderStats] = {}
         self._returns: dict[str, list[float]] = {}
         self._min_trades_for_score = min_trades_for_score
+        self._mode = mode
+        # Prior for Beta(alpha, beta). Alpha=beta=1 is uniform prior.
+        self._alpha = bayesian_prior_alpha
+        self._beta = bayesian_prior_beta
+        self._lcb_stdev = bayesian_lcb_stdev
 
     # ----- mutation -----
 
@@ -111,14 +124,19 @@ class TraderScorer:
         return mean / sd if sd > 0 else 0.0
 
     def score(self, wallet: str) -> float:
-        """Composite score in [0, 1]. Combines ROI, win rate, Sharpe, and
-        drawdown. Below `min_trades_for_score`, returns a neutral prior of 0.5
-        so new traders aren't prematurely excluded (they can still be cut by
+        """Score in [0, 1]. Uses the composite regime by default; if the
+        scorer was configured with mode='bayesian', uses Beta-posterior
+        lower-confidence-bound on win rate instead. Below
+        `min_trades_for_score`, returns a neutral prior of 0.5 so new
+        traders aren't prematurely excluded (they can still be cut by
         the risk manager on streaks)."""
         wallet = wallet.lower()
         s = self._stats.get(wallet)
         if s is None or s.trades < self._min_trades_for_score:
             return 0.5
+
+        if self._mode == "bayesian":
+            return self.bayesian_score(wallet)
 
         roi_component = _squash(s.roi, scale=0.25)
         wr_component = max(0.0, min(1.0, s.win_rate))
@@ -132,6 +150,39 @@ class TraderScorer:
             0.15 * dd_penalty
         )
         return max(0.0, min(1.0, raw))
+
+    def bayesian_score(self, wallet: str) -> float:
+        """Lower confidence bound of Beta-posterior win rate.
+
+        For wins w and losses l with prior Beta(alpha, beta):
+            posterior mean = (alpha + w) / (alpha + beta + w + l)
+            posterior variance = mean * (1 - mean) / (alpha + beta + w + l + 1)
+
+        Returning `mean - k * stdev` gives a conservative score for traders
+        with few observations (wide posterior) and rewards those with
+        sustained sample size. This enables Thompson-style exploration:
+        new traders aren't rejected outright (they sit near the prior mean),
+        but they don't get sized up until they have evidence."""
+        wallet = wallet.lower()
+        s = self._stats.get(wallet)
+        if s is None:
+            alpha0 = self._alpha
+            beta0 = self._beta
+            wins = losses = 0
+        else:
+            alpha0 = self._alpha
+            beta0 = self._beta
+            wins = s.wins
+            losses = s.losses
+
+        a = alpha0 + wins
+        b = beta0 + losses
+        n = a + b
+        mean = a / n if n > 0 else 0.5
+        var = (mean * (1 - mean)) / (n + 1) if n > 0 else 0.25
+        stdev = math.sqrt(max(0.0, var))
+        lcb = mean - self._lcb_stdev * stdev
+        return max(0.0, min(1.0, lcb))
 
     def rank(self) -> list[tuple[str, float]]:
         ranked = [(s.wallet, self.score(s.wallet)) for s in self._stats.values()]

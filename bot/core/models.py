@@ -52,6 +52,11 @@ class TradeSignal:
     timestamp: float  # unix seconds
     tx_hash: Optional[str] = None
     signal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Optional: unix seconds of the underlying market's resolution time.
+    # When provided, the PositionSizer decays Kelly toward zero as the
+    # resolution approaches (short-dated markets have less room for
+    # edge and liquidity evaporates near close).
+    resolution_ts: Optional[float] = None
 
     @property
     def notional(self) -> float:

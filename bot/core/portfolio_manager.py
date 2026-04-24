@@ -188,6 +188,20 @@ class PortfolioManager:
             if p.market_id == market_id
         )
 
+    def group_exposure(
+        self,
+        group: str,
+        *,
+        correlation_groups: dict[str, str],
+    ) -> float:
+        """Sum notional across every token in the same correlation group.
+        Tokens with no entry in `correlation_groups` are singletons."""
+        return sum(
+            p.entry_price * p.size
+            for p in self._positions.values()
+            if correlation_groups.get(p.token_id, p.token_id) == group
+        )
+
     def open_exposure(self) -> float:
         return sum(p.entry_price * p.size for p in self._positions.values())
 

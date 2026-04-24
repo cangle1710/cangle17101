@@ -1,0 +1,37 @@
+services:
+  bot:
+    build: .
+    image: polymarket-copy-bot:local
+    restart: unless-stopped
+    environment:
+      - POLYGON_PRIVATE_KEY=${POLYGON_PRIVATE_KEY:-}
+      - CLOB_API_KEY=${CLOB_API_KEY:-}
+      - CLOB_API_SECRET=${CLOB_API_SECRET:-}
+      - CLOB_API_PASSPHRASE=${CLOB_API_PASSPHRASE:-}
+    volumes:
+      - ./state:/state
+      - ./logs:/logs
+      - ./bot/config.yaml:/app/bot/config.yaml:ro
+    ports:
+      - "127.0.0.1:9090:9090"  # metrics + healthz exposed only on loopback
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9091:9090"
+    depends_on:
+      - bot
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    restart: unless-stopped
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus

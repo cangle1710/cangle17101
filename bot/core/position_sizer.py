@@ -114,6 +114,18 @@ class PositionSizer:
 
         kelly_applied = kelly * _clamp(self._cfg.kelly_fraction, 0.0, 1.0)
 
+        # ----- resolution-date decay -----
+        # Short-dated markets have less room for edge to materialize and
+        # liquidity dries up in the final hours. Decay Kelly linearly so
+        # positions opened inside the last 24h are proportionally smaller.
+        if signal.resolution_ts is not None:
+            seconds_left = signal.resolution_ts - signal.timestamp
+            one_day = 24 * 3600.0
+            if seconds_left <= 0:
+                kelly_applied = 0.0
+            elif seconds_left < one_day:
+                kelly_applied *= seconds_left / one_day
+
         # ----- hard caps -----
         per_trade_cap = bankroll * self._cfg.max_pct_per_trade
         per_market_cap = bankroll * self._cfg.max_pct_per_market

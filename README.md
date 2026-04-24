@@ -169,6 +169,71 @@ See `bot/backtest/backtester.py` for the interface. The default fill model
 assumes an instant fill at the limit price; replace it with a book-walk
 simulator for more realism.
 
+## Operations
+
+### Metrics & health
+
+When `observability.enabled` is true (default), the bot exposes a tiny
+HTTP server on `127.0.0.1:9090`:
+
+```
+GET /metrics   # Prometheus text format: signal counts, rejection reasons,
+               # slippage bps histogram, execution latency, equity, open
+               # exposure, open positions, halts, trader cutoffs, etc.
+GET /healthz   # 200 "ok" if the process is alive
+GET /readyz    # 200 if the orchestrator is running + DB is writable,
+               # else 503 with the failure reason
+```
+
+Scrape with Prometheus and chart in Grafana. A one-shot local stack is
+available via `docker-compose up`.
+
+### Admin CLI
+
+```
+python -m bot.cli --config bot/config.yaml status
+python -m bot.cli --config bot/config.yaml halt --reason "ops maintenance"
+python -m bot.cli --config bot/config.yaml resume
+python -m bot.cli --config bot/config.yaml cutoff --wallet 0xabc --reason "losing"
+python -m bot.cli --config bot/config.yaml uncutoff --wallet 0xabc
+python -m bot.cli --config bot/config.yaml positions
+python -m bot.cli --config bot/config.yaml traders
+python -m bot.cli --config bot/config.yaml replay --file logs/decisions.jsonl
+```
+
+All commands talk to the same SQLite state file the bot uses; writes are
+picked up on the next maintenance tick (60s) or by checking the file on
+every signal (kill-switch file and per-wallet cutoffs are read eagerly).
+
+### Kill-switch file
+
+`safety.kill_switch_file` (default empty / disabled) is a path that, if
+it exists on disk, blocks all new entries immediately. The exit loop
+keeps working. Use it for emergency pauses without attaching a debugger:
+
+```
+touch /var/run/bot.halt   # pause trading
+rm /var/run/bot.halt      # resume
+```
+
+### Paper vs live banner
+
+On startup the bot prints a loud banner indicating which mode it's in.
+When `execution.dry_run: false`, it waits
+`safety.live_mode_confirm_delay_seconds` (default 5s) before starting
+the pipeline, giving you time to Ctrl+C if it was left off by accident.
+
+### Regression replay
+
+Compare today's code against yesterday's decisions:
+
+```
+python -m bot.tools.replay --file logs/decisions.jsonl --config bot/config.yaml
+```
+
+Emits agreement counts and per-reason diffs; exits non-zero if any
+event's accept/reject outcome changed.
+
 ## Extending
 
 - **Different scorer:** subclass `TraderScorer` and override `score()`.

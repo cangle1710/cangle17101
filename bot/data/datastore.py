@@ -101,8 +101,12 @@ CREATE TABLE IF NOT EXISTS equity (
 
 CREATE TABLE IF NOT EXISTS processed_trades (
     key TEXT PRIMARY KEY,
-    seen_at REAL NOT NULL
+    seen_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'processing',
+    completed_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_processed_trades_status
+    ON processed_trades(status, seen_at);
 
 CREATE TABLE IF NOT EXISTS kv_state (
     key TEXT PRIMARY KEY,
@@ -154,7 +158,8 @@ class DataStore:
         with self._tx() as cur:
             try:
                 cur.execute(
-                    "INSERT INTO processed_trades(key, seen_at) VALUES (?, ?)",
+                    "INSERT INTO processed_trades(key, seen_at, status) "
+                    "VALUES (?, ?, 'processing')",
                     (key, time.time()),
                 )
                 return True
@@ -162,8 +167,41 @@ class DataStore:
                 return False
 
     async def mark_processed(self, key: str) -> bool:
-        """Atomically claim a trade signal by key. Returns True if new."""
+        """Atomically claim a trade signal by key. Returns True if new.
+
+        Newly claimed keys enter the 'processing' state. The caller MUST
+        flip them to 'done' via `mark_signal_done(key)` once the position
+        has been opened (or explicit rejection occurred). On restart,
+        `scan_stuck_signals()` surfaces any claims that never completed."""
         return await self._run(self._mark_processed_sync, key)
+
+    def _mark_signal_done_sync(self, key: str) -> None:
+        with self._tx() as cur:
+            cur.execute(
+                "UPDATE processed_trades SET status='done', completed_at=? "
+                "WHERE key=?",
+                (time.time(), key),
+            )
+
+    async def mark_signal_done(self, key: str) -> None:
+        await self._run(self._mark_signal_done_sync, key)
+
+    def _scan_stuck_signals_sync(self, older_than: float) -> list[tuple[str, float]]:
+        cur = self._conn.execute(
+            "SELECT key, seen_at FROM processed_trades "
+            "WHERE status='processing' AND seen_at < ? ORDER BY seen_at",
+            (older_than,),
+        )
+        out = [(r["key"], r["seen_at"]) for r in cur.fetchall()]
+        cur.close()
+        return out
+
+    async def scan_stuck_signals(self, older_than_seconds: float = 60.0) -> list[tuple[str, float]]:
+        """Return signals that were claimed but never marked done, and are
+        older than `older_than_seconds`. Operators can inspect and either
+        resume or abandon them."""
+        cutoff = time.time() - older_than_seconds
+        return await self._run(self._scan_stuck_signals_sync, cutoff)
 
     # ----- signals -----
 

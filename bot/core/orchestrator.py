@@ -25,7 +25,9 @@ from typing import Optional
 from ..data import DataStore
 from ..execution import ExecutionEngine
 from ..execution.clob_client import ClobClient, ClobError
+from ..observability import pipeline_metrics as M
 from ..risk import RiskManager
+from .enhancements import AdverseSelectionObserver, SignalAggregator
 from .config import BotConfig
 from .exit_manager import ExitAction, ExitManager
 from .http import HttpClient
@@ -58,6 +60,8 @@ class Orchestrator:
         execution: ExecutionEngine,
         exit_mgr: ExitManager,
         decisions: DecisionLogger,
+        aggregator: Optional[SignalAggregator] = None,
+        adverse_selection: Optional[AdverseSelectionObserver] = None,
     ):
         self._cfg = config
         self._http = http
@@ -72,6 +76,8 @@ class Orchestrator:
         self._execution = execution
         self._exit = exit_mgr
         self._decisions = decisions
+        self._aggregator = aggregator
+        self._adverse_selection = adverse_selection
         self._running = False
 
         # Cache of recent "sell" signals per (wallet, token) so the exit
@@ -89,6 +95,23 @@ class Orchestrator:
         cutoffs = await self._store.load_cutoffs()
         halt = await self._store.kv_get("global_halt_reason")
         self._risk.hydrate(global_halt_reason=halt, cutoffs=cutoffs)
+
+        # Outbox-style recovery scan: any signal whose claim was never
+        # marked `done` before a previous shutdown is surfaced in logs
+        # and the decision journal. We don't auto-retry (a crash between
+        # claim and execute could mean the order went through but we lost
+        # the ack) — operators inspect and resume via the admin CLI.
+        try:
+            stuck = await self._store.scan_stuck_signals(older_than_seconds=60.0)
+            for key, seen_at in stuck:
+                log.warning("stuck signal at recovery: key=%s seen_at=%.0f",
+                            key, seen_at)
+                self._decisions.record(
+                    "stuck_signal_recovered",
+                    key=key, seen_at=seen_at,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("stuck-signal recovery scan failed")
 
         tasks = [
             asyncio.create_task(self._entry_loop(), name="entry_loop"),
@@ -119,11 +142,31 @@ class Orchestrator:
                 log.exception("entry loop error for %s", signal.signal_id)
 
     async def _handle_signal(self, signal: TradeSignal) -> None:
+        started = time.monotonic()
+        M.SIGNALS_TOTAL.inc(labels={"wallet": signal.wallet})
         # 1. Idempotency: claim the key in the store.
         key = dedupe_key(signal)
         if not await self._store.mark_processed(key):
+            M.SIGNALS_DUPLICATE.inc()
             return
-        await self._store.record_signal(signal)
+
+        # Wrap the rest in try/finally so the outbox 'processing' row is
+        # always flipped to 'done' regardless of which reject branch fires.
+        # A crash inside here still leaves the row stuck — the recovery
+        # scan surfaces it on next boot.
+        try:
+            await self._store.record_signal(signal)
+            await self._handle_signal_inner(signal, key, started)
+        finally:
+            await self._store.mark_signal_done(key)
+
+    async def _handle_signal_inner(
+        self, signal: TradeSignal, key: str, started: float,
+    ) -> None:
+        # Clustering is observability-only; emit before any rejection so
+        # we see clusters even on rejected signals.
+        if self._aggregator is not None:
+            self._aggregator.observe(signal)
 
         # 2. Record trader sell so the exit loop can mirror it.
         if signal.side == Side.SELL:
@@ -166,10 +209,17 @@ class Orchestrator:
             return
 
         # 6. Risk.
+        correlation_groups = self._cfg.risk.correlation_groups or {}
+        group = correlation_groups.get(signal.token_id, signal.token_id)
+        group_exposure = self._portfolio.group_exposure(
+            group, correlation_groups=correlation_groups,
+        )
         risk_check = self._risk.check_entry(
             wallet=signal.wallet,
             proposed_notional=sizing.notional,
             snap=self._portfolio.risk_snapshot(),
+            group=group,
+            group_exposure=group_exposure,
         )
         if not risk_check.allowed:
             self._reject(signal, risk_check.reason, **risk_check.detail)
@@ -195,6 +245,25 @@ class Orchestrator:
             signal, entry_price=result.avg_price, size=result.filled_size,
         )
 
+        # Schedule an adverse-selection check if the observer is wired.
+        if self._adverse_selection is not None:
+            self._adverse_selection.schedule(
+                position_id=position.position_id,
+                market_id=signal.market_id,
+                token_id=signal.token_id,
+                side=signal.side,
+                fill_price=result.avg_price,
+            )
+
+        M.SIGNALS_COPIED.inc()
+        M.ORDERS_PLACED.inc(labels={"side": signal.side.value})
+        M.EXEC_LATENCY.observe(time.monotonic() - started)
+        M.SLIPPAGE_BPS.observe(result.slippage_pct * 10000.0)
+        M.POSITIONS_OPEN.set(len(self._portfolio.open_positions()))
+        M.OPEN_EXPOSURE_USDC.set(self._portfolio.open_exposure())
+        M.REALIZED_PNL_USDC.set(self._portfolio.realized_pnl)
+        M.EQUITY_USDC.set(self._portfolio.current_equity())
+
         self._decisions.record(
             "copied",
             signal_id=signal.signal_id,
@@ -213,6 +282,9 @@ class Orchestrator:
         )
 
     def _reject(self, signal: TradeSignal, reason: str, **detail) -> None:
+        M.SIGNALS_REJECTED.inc(labels={"reason": reason})
+        if reason == "slippage_abort" or reason.startswith("exec_"):
+            M.ORDERS_ABORTED.inc(labels={"reason": reason})
         self._decisions.record(
             "rejected",
             signal_id=signal.signal_id,
@@ -261,6 +333,7 @@ class Orchestrator:
                 if decision.action == ExitAction.HOLD:
                     continue
 
+                M.EXITS_TOTAL.inc(labels={"reason": decision.reason})
                 await self._close_position(p, book)
 
     async def _close_position(self, position: Position, book) -> None:
@@ -345,6 +418,20 @@ class Orchestrator:
                         "global_halt_reason", self._risk._halt_reason or "tripped",
                     )
                 await self._store.append_equity(self._portfolio.current_equity())
+
+                # Refresh gauges each tick so Prometheus scrapes see current
+                # state even when the pipeline is quiet.
+                M.POSITIONS_OPEN.set(len(self._portfolio.open_positions()))
+                M.OPEN_EXPOSURE_USDC.set(self._portfolio.open_exposure())
+                M.REALIZED_PNL_USDC.set(self._portfolio.realized_pnl)
+                M.EQUITY_USDC.set(self._portfolio.current_equity())
+                M.GLOBAL_HALTED.set(1.0 if self._risk.global_halted else 0.0)
+                M.TRADER_CUTOFFS.set(float(self._risk.cutoff_count()))
+
+                # Adverse-selection checks come due after `check_after`
+                # seconds per scheduled fill. Best-effort.
+                if self._adverse_selection is not None:
+                    await self._adverse_selection.run_due()
             except Exception:
                 log.exception("maintenance loop error")
             await asyncio.sleep(60.0)
