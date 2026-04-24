@@ -35,3 +35,25 @@ services:
       - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: polymarket-bot-dashboard:local
+    restart: unless-stopped
+    environment:
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
+      - DASHBOARD_BOT_DB_PATH=/state/bot.sqlite
+      - DASHBOARD_BOT_CONFIG_PATH=/app/bot/config.yaml
+      - DASHBOARD_DECISIONS_LOG_PATH=/logs/decisions.jsonl
+      - DASHBOARD_AUDIT_DB_PATH=/state/dashboard_audit.sqlite
+      - DASHBOARD_STATIC_DIR=/app/dashboard/web/dist
+    volumes:
+      - ./state:/state
+      - ./logs:/logs:ro
+      - ./bot/config.yaml:/app/bot/config.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - bot

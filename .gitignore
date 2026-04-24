@@ -16,3 +16,7 @@ state/
 .idea/
 .vscode/
 .DS_Store
+
+# Dashboard SPA build artifacts
+dashboard/web/node_modules/
+dashboard/web/dist/

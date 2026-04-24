@@ -223,6 +223,33 @@ When `execution.dry_run: false`, it waits
 `safety.live_mode_confirm_delay_seconds` (default 5s) before starting
 the pipeline, giving you time to Ctrl+C if it was left off by accident.
 
+### Web dashboard
+
+A FastAPI + React dashboard ships alongside the bot in `dashboard/`. It
+reads the bot's SQLite state for live KPIs (equity, P&L, open positions,
+ranked traders, decision feed) and lets you flip the same admin controls
+the CLI exposes (halt/resume, trader cutoff/uncutoff). The bot picks
+those changes up on its next maintenance tick (~60s) — no restart, no IPC.
+
+Local dev:
+
+```
+cd dashboard/web && npm install && npm run build && cd -
+pip install -r dashboard/requirements.txt
+DASHBOARD_API_KEY=$(openssl rand -hex 24) \
+DASHBOARD_BOT_DB_PATH=state/bot.sqlite \
+DASHBOARD_BOT_CONFIG_PATH=bot/config.yaml \
+DASHBOARD_DECISIONS_LOG_PATH=logs/decisions.jsonl \
+uvicorn dashboard.app.main:app --host 127.0.0.1 --port 8080
+```
+
+In Docker, `docker compose up dashboard` brings it up on
+`127.0.0.1:8080` next to the existing bot/Prometheus/Grafana stack.
+Authenticate with the API key from `DASHBOARD_API_KEY`. The dashboard
+never modifies the bot's source — it talks to the shared SQLite via
+WAL-mode reads and writes only the same `kv_state` / `trader_cutoffs`
+tables the CLI does.
+
 ### Regression replay
 
 Compare today's code against yesterday's decisions:
