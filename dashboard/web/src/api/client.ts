@@ -54,7 +54,21 @@ export const api = {
     }),
   clearCutoff: (wallet: string) =>
     request<{ ok: boolean }>(`/api/cutoff/${encodeURIComponent(wallet)}`, { method: "DELETE" }),
+  executionMode: () => request<ExecutionMode>("/api/execution_mode"),
+  setExecutionMode: (mode: "paper" | "live") =>
+    request<ExecutionMode>("/api/execution_mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  clearExecutionMode: () =>
+    request<ExecutionMode>("/api/execution_mode", { method: "DELETE" }),
 };
+
+export interface ExecutionMode {
+  effective: "paper" | "live";
+  override: "paper" | "live" | null;
+  config_allows_live: boolean;
+}
 
 export interface Summary {
   bankroll_usdc: number;

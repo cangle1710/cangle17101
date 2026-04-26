@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api } from "../api/client";
+import { useEffect, useState } from "react";
+import { api, type ExecutionMode } from "../api/client";
 import { usePolling } from "../components/usePolling";
 
 export default function Controls() {
@@ -10,6 +10,17 @@ export default function Controls() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [mode, setMode] = useState<ExecutionMode | null>(null);
+
+  useEffect(() => {
+    api.executionMode().then(setMode).catch(() => {});
+  }, []);
+
+  async function refreshMode() {
+    try {
+      setMode(await api.executionMode());
+    } catch {}
+  }
 
   async function doSetHalt() {
     if (!haltReason.trim()) return;
@@ -45,6 +56,32 @@ export default function Controls() {
     finally { setBusy(false); }
   }
 
+  async function doSetMode(target: "paper" | "live") {
+    if (target === "live") {
+      const ok = window.confirm(
+        "Switch to LIVE trading? Real orders will be signed and submitted on the next signal. Continue?",
+      );
+      if (!ok) return;
+    }
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      const next = await api.setExecutionMode(target);
+      setMode(next);
+      setMsg(`execution mode = ${next.effective}`);
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function doClearMode() {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      const next = await api.clearExecutionMode();
+      setMode(next);
+      setMsg("override cleared; following YAML");
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
   const halt = summary.data?.global_halt;
 
   return (
@@ -53,6 +90,52 @@ export default function Controls() {
 
       {msg && <div className="banner good">{msg}</div>}
       {err && <div className="banner bad">{err}</div>}
+
+      <div className="panel">
+        <h2>Execution mode</h2>
+        {mode ? (
+          <>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+              Currently <strong>{mode.effective.toUpperCase()}</strong>
+              {mode.override && (
+                <span className="muted"> · override: {mode.override}</span>
+              )}
+              {!mode.config_allows_live && (
+                <span className="muted">
+                  {" "}· YAML pinned <span className="mono">execution.dry_run=true</span>;
+                  flip in <span className="mono">bot/config.yaml</span> and restart to enable live.
+                </span>
+              )}
+              {" "}Bot picks up changes within ~60 s.
+            </p>
+            <div className="row">
+              <button
+                disabled={busy || mode.effective === "paper"}
+                onClick={() => doSetMode("paper")}
+              >
+                Force paper
+              </button>
+              <button
+                className="danger"
+                disabled={busy || !mode.config_allows_live || mode.effective === "live"}
+                onClick={() => doSetMode("live")}
+                title={!mode.config_allows_live ? "Disabled by YAML config" : undefined}
+              >
+                Switch to live
+              </button>
+              <button
+                disabled={busy || mode.override === null}
+                onClick={doClearMode}
+              >
+                Clear override
+              </button>
+              <button onClick={refreshMode} style={{ marginLeft: "auto" }}>Refresh</button>
+            </div>
+          </>
+        ) : (
+          <div className="muted">loading…</div>
+        )}
+      </div>
 
       <div className="panel">
         <h2>Global halt</h2>

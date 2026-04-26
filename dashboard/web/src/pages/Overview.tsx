@@ -8,6 +8,7 @@ const fmt = (n: number) =>
 export default function Overview() {
   const summary = usePolling(() => api.summary(), 5000);
   const series = usePolling(() => api.equitySeries(0), 10000);
+  const mode = usePolling(() => api.executionMode(), 5000);
 
   if (summary.loading && !summary.data) return <div>Loading…</div>;
   if (summary.error) return <div className="banner bad">Failed to load summary: {summary.error.message}</div>;
@@ -28,11 +29,22 @@ export default function Overview() {
         <div className="banner good">Running</div>
       )}
 
-      {s.dry_run === true && (
-        <div className="banner warn">
-          <strong>DRY RUN</strong> — no live orders are being signed
-          {s.bot_config_path && <span className="muted"> (config: {s.bot_config_path})</span>}
-        </div>
+      {mode.data && (
+        mode.data.effective === "live" ? (
+          <div className="banner bad">
+            <strong>LIVE TRADING</strong> — real orders are being signed and submitted
+          </div>
+        ) : (
+          <div className="banner warn">
+            <strong>PAPER TRADING</strong> — fills are simulated locally; no orders sent to Polymarket
+            {mode.data.override === "paper" && mode.data.config_allows_live && (
+              <span className="muted"> (operator override; YAML allows live)</span>
+            )}
+            {!mode.data.config_allows_live && (
+              <span className="muted"> (config ceiling: execution.dry_run=true)</span>
+            )}
+          </div>
+        )
       )}
 
       <div className="kpi-grid">

@@ -95,3 +95,19 @@ class HealthOut(BaseModel):
     status: str
     db_ok: bool
     decisions_log_ok: bool
+
+
+class ExecutionModeOut(BaseModel):
+    # The mode the running bot is using right now.
+    # "paper" = simulated fills locally; "live" = real orders signed.
+    effective: str
+    # What the operator override stored in kv_state['execution_mode'] is,
+    # if any. "paper" forces paper; absent means "follow YAML".
+    override: Optional[str] = None
+    # YAML's execution.dry_run inverted: True means the operator can flip
+    # to live at runtime; False means the YAML pinned paper as a ceiling.
+    config_allows_live: bool
+
+
+class ExecutionModeIn(BaseModel):
+    mode: str  # "paper" or "live"

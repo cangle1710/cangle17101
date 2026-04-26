@@ -421,6 +421,13 @@ class Orchestrator:
                     cutoffs=external_cutoffs,
                 )
 
+                # Runtime paper/live override. kv_state['execution_mode']
+                # = "paper" forces paper; "live" or absent defers to YAML.
+                # ClobClient.set_force_paper itself clamps to YAML so this
+                # cannot escalate beyond the configured ceiling.
+                mode = await self._store.kv_get("execution_mode")
+                self._clob.set_force_paper(mode == "paper")
+
                 self._portfolio.roll_anchors()
                 await self._portfolio.persist_anchors()
                 was_halted = self._risk.global_halted

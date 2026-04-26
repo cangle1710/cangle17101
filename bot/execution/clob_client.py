@@ -56,7 +56,39 @@ class ClobClient:
     ):
         self._cfg = config
         self._http = http
-        self._signer = signer or _dry_run_signer(config)
+        # The "live" signer (real or injected). When config.dry_run=true we
+        # never construct a real signer; the ceiling is paper.
+        self._live_signer = signer or _dry_run_signer(config)
+        # The paper signer is always available so an operator can force
+        # paper at runtime without restart.
+        self._paper_signer = _dry_run_signer(config)
+        # Runtime mode. Starts at the YAML ceiling (paper if dry_run=true).
+        self._force_paper = bool(config.dry_run)
+
+    # ----- runtime mode (paper vs live) -----
+
+    @property
+    def force_paper(self) -> bool:
+        """True if the next signed call will go through the paper signer."""
+        return self._force_paper
+
+    @property
+    def config_allows_live(self) -> bool:
+        """False when YAML pinned dry_run=true; the ceiling can't be lifted
+        without an explicit config edit + restart."""
+        return not self._cfg.dry_run
+
+    def set_force_paper(self, paper: bool) -> None:
+        """Flip runtime mode. Clamped to YAML's dry_run — calling
+        set_force_paper(False) when config.dry_run=true is a no-op so the
+        operator can't accidentally go live via a UI/DB toggle."""
+        if self._cfg.dry_run:
+            self._force_paper = True
+            return
+        self._force_paper = bool(paper)
+
+    def _signer_for_call(self) -> OrderSigner:
+        return self._paper_signer if self._force_paper else self._live_signer
 
     # ----- public reads -----
 
@@ -100,12 +132,12 @@ class ClobClient:
             "client_order_id": client_order_id or str(uuid.uuid4()),
             "ts": time.time(),
         }
-        raw = await self._signer(order)
+        raw = await self._signer_for_call()(order)
         return _parse_place_response(raw)
 
     async def cancel(self, order_id: str) -> bool:
         try:
-            raw = await self._signer({
+            raw = await self._signer_for_call()({
                 "cancel_order_id": order_id, "ts": time.time(),
             })
             return bool(raw.get("success", True))

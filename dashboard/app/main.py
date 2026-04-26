@@ -21,7 +21,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Settings, get_settings
 from .db import assert_schema, open_audit_db, open_bot_db
-from .routers import controls, decisions, health, positions, summary, traders
+from .routers import (
+    controls, decisions, execution_mode, health, positions, summary, traders,
+)
 
 log = logging.getLogger("dashboard")
 access = logging.getLogger("dashboard.access")
@@ -103,7 +105,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     for r in (health.router, summary.router, positions.router,
-              traders.router, decisions.router, controls.router):
+              traders.router, decisions.router, controls.router,
+              execution_mode.router):
         app.include_router(r)
 
     static_dir = Path(settings.static_dir)
