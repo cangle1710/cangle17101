@@ -171,6 +171,38 @@ simulator for more realism.
 
 ## Operations
 
+### Paper vs live trading
+
+Paper mode is the default — `execution.dry_run: true` in `bot/config.yaml`
+means the bot tracks real Polymarket prices but the `_dry_run_signer`
+simulates fills locally; nothing is signed or sent to the CLOB. You can
+also flip between paper and live at runtime from the dashboard
+(`/api/execution_mode`); the YAML's `dry_run` is the ceiling — operator
+overrides cannot escalate beyond it.
+
+### Demo mode (offline test loop)
+
+Polymarket has no testnet. To exercise the full pipeline without any
+network access — useful for local development, demos, or sandboxed
+environments — set `demo.enabled: true` in `bot/config.yaml`. The
+WalletTracker emits synthetic TradeSignals from the configured demo
+wallets/markets at the configured rate, the ClobClient serves synthetic
+order books for those tokens, and (because dry_run defaults to true)
+fills are simulated locally. On startup, trader_stats are auto-seeded
+with positive history for demo wallets so the sizer produces non-zero
+positions. The dashboard sees live activity within seconds.
+
+```yaml
+demo:
+  enabled: true
+  signals_per_minute: 30.0
+  wallets:
+    - "0xdemo000000000000000000000000000000000001"
+    - "0xdemo000000000000000000000000000000000002"
+  markets:
+    - {market_id: "demo-trump-2028", token_id: "demo-tok-trump-yes", price: 0.42, outcome: "YES", liquidity: 30000}
+```
+
 ### Metrics & health
 
 When `observability.enabled` is true (default), the bot exposes a tiny

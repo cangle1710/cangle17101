@@ -20,3 +20,6 @@ state/
 # Dashboard SPA build artifacts
 dashboard/web/node_modules/
 dashboard/web/dist/
+
+# TS incremental build cache + lockfile (lockfile is regenerated per build env)
+dashboard/web/tsconfig.tsbuildinfo

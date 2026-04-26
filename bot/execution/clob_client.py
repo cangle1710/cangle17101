@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from ..core.config import ExecutionConfig
+from ..core.config import DemoConfig, ExecutionConfig
 from ..core.http import HttpClient
 from ..core.models import OrderBookSnapshot, Side
 
@@ -53,6 +53,7 @@ class ClobClient:
         config: ExecutionConfig,
         http: HttpClient,
         signer: Optional[OrderSigner] = None,
+        demo: Optional[DemoConfig] = None,
     ):
         self._cfg = config
         self._http = http
@@ -64,6 +65,21 @@ class ClobClient:
         self._paper_signer = _dry_run_signer(config)
         # Runtime mode. Starts at the YAML ceiling (paper if dry_run=true).
         self._force_paper = bool(config.dry_run)
+        # Demo mode: serve synthetic books for known demo tokens so the
+        # full pipeline can run without touching polymarket.com.
+        self._demo = demo if demo and demo.enabled else None
+        self._demo_books: dict[str, "OrderBookSnapshot"] = {}
+        if self._demo:
+            for m in self._demo.markets:
+                half = m.price * m.spread_pct
+                self._demo_books[m.token_id] = OrderBookSnapshot(
+                    market_id=m.market_id,
+                    token_id=m.token_id,
+                    best_bid=max(0.01, m.price - half),
+                    best_ask=min(0.99, m.price + half),
+                    bid_size=m.liquidity,
+                    ask_size=m.liquidity,
+                )
 
     # ----- runtime mode (paper vs live) -----
 
@@ -93,6 +109,8 @@ class ClobClient:
     # ----- public reads -----
 
     async def order_book(self, token_id: str) -> OrderBookSnapshot:
+        if token_id in self._demo_books:
+            return self._demo_books[token_id]
         url = f"{self._cfg.clob_base_url.rstrip('/')}/book"
         payload = await self._http.get_json(url, params={"token_id": token_id})
         return _parse_book(payload, token_id)

@@ -67,7 +67,9 @@ def get_summary(request: Request, db: sqlite3.Connection = Depends(get_bot_db)) 
     dry_run, starting_bankroll, bot_config_path = _bot_runtime_info(request)
     fallback_bankroll = starting_bankroll if starting_bankroll is not None else 0.0
     equity_now = latest_eq_row["equity"] if latest_eq_row else fallback_bankroll + realized_pnl
-    unrealized = max(0.0, equity_now - fallback_bankroll - realized_pnl)
+    # Equity table is mark-to-market: bankroll + realized + unrealized.
+    # So unrealized = equity - bankroll - realized, and CAN be negative.
+    unrealized = equity_now - fallback_bankroll - realized_pnl
 
     anchors_raw = db.execute(
         "SELECT value FROM kv_state WHERE key='equity_anchors'"

@@ -71,6 +71,27 @@ async def _ready_probe_factory(orch: "Orchestrator", store: "DataStore"):
     return probe
 
 
+async def _seed_demo_traders(store: "DataStore", cfg) -> None:
+    """Hydrate trader_stats for demo wallets that don't have any yet, so
+    the SignalFilter/PositionSizer give synthetic signals a positive edge
+    and the pipeline actually opens positions in demo mode."""
+    from .core.models import TraderStats
+    for wallet in cfg.demo.wallets:
+        w = wallet.lower()
+        existing = await store.load_trader_stats(w)
+        if existing is not None:
+            continue
+        stats = TraderStats(
+            wallet=w,
+            trades=22, wins=15, losses=7,
+            realized_pnl=85.0, total_notional=620.0,
+            equity_curve=[0, 8, 18, 30, 45, 60, 78, 85],
+            consecutive_losses=0,
+            max_drawdown=0.08, peak_equity=88.0,
+        )
+        await store.upsert_trader_stats(stats)
+
+
 async def _amain(config_path: Path) -> int:
     cfg = load_config(config_path)
     setup_logging(cfg.logging.level, cfg.logging.log_file)
@@ -82,6 +103,9 @@ async def _amain(config_path: Path) -> int:
 
     store = DataStore(cfg.data.db_path)
     http = HttpClient()
+
+    if cfg.demo.enabled and cfg.demo.auto_seed_traders:
+        await _seed_demo_traders(store, cfg)
 
     scorer = TraderScorer(
         mode=cfg.scoring.mode,
@@ -95,8 +119,8 @@ async def _amain(config_path: Path) -> int:
     portfolio = PortfolioManager(cfg.bankroll, store)
     exit_mgr = ExitManager(cfg.exit)
 
-    tracker = WalletTracker(cfg.tracker, http)
-    clob = ClobClient(cfg.execution, http)
+    tracker = WalletTracker(cfg.tracker, http, demo=cfg.demo)
+    clob = ClobClient(cfg.execution, http, demo=cfg.demo)
     execution = ExecutionEngine(cfg.execution, clob)
 
     decisions = DecisionLogger(cfg.logging.decisions_file)
