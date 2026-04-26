@@ -1,7 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type DecisionsPage } from "../api/client";
 
-const TYPES = ["", "copy", "rejected", "exit", "sized"];
+// Event names emitted by bot/core/orchestrator.py and enhancements.py.
+// "" means "all" in the dropdown.
+const TYPES = [
+  "",
+  "copied",
+  "rejected",
+  "exit",
+  "exit_failed",
+  "signal_cluster",
+  "adverse_selection_check",
+  "stuck_signal_recovered",
+  "trader_sell_observed",
+];
 
 export default function Decisions() {
   const [type, setType] = useState("");
@@ -9,11 +21,13 @@ export default function Decisions() {
   const [error, setError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const offsetRef = useRef(0);
+  const seqRef = useRef(0);
   const tailRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setItems([]);
     offsetRef.current = 0;
+    seqRef.current = 0;
   }, [type]);
 
   useEffect(() => {
@@ -24,7 +38,12 @@ export default function Decisions() {
         const page = await api.decisions(offsetRef.current, type || undefined);
         if (cancelled) return;
         offsetRef.current = page.next_offset;
-        setItems((prev) => [...prev.slice(-1000), ...page.items].slice(-2000));
+        // Tag items with a monotonic id so React keys stay stable across slices.
+        const stamped = page.items.map((it) => ({
+          ...it,
+          _id: ++seqRef.current,
+        }));
+        setItems((prev) => [...prev, ...stamped].slice(-2000));
         setError(null);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
@@ -64,10 +83,11 @@ export default function Decisions() {
 
       <div className="panel mono" style={{ maxHeight: "60vh", overflow: "auto", fontSize: 12 }}>
         {items.length === 0 && <div className="muted">No events yet.</div>}
-        {items.map((it, i) => {
-          const ev = (it.raw as any).event ?? "?";
+        {items.map((it) => {
+          const ev = (it.raw as { event?: string }).event ?? "?";
+          const id = (it as unknown as { _id: number })._id;
           return (
-            <div key={`${i}-${it.line_no}`} style={{ padding: "4px 0", borderBottom: "1px solid #1b2230" }}>
+            <div key={id} style={{ padding: "4px 0", borderBottom: "1px solid #1b2230" }}>
               <span className={`tag ${tagTone(ev)}`}>{ev}</span>{" "}
               <span>{JSON.stringify(it.raw)}</span>
             </div>
@@ -80,8 +100,8 @@ export default function Decisions() {
 }
 
 function tagTone(ev: string): string {
-  if (ev === "copy" || ev === "filled") return "good";
-  if (ev === "rejected" || ev === "aborted") return "bad";
-  if (ev === "exit") return "warn";
+  if (ev === "copied") return "good";
+  if (ev === "rejected" || ev === "exit_failed") return "bad";
+  if (ev === "exit" || ev === "signal_cluster" || ev === "adverse_selection_check") return "warn";
   return "muted";
 }

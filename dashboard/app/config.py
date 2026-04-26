@@ -65,6 +65,6 @@ def get_settings() -> Settings:
         raise RuntimeError(
             "DASHBOARD_API_KEY is required (or set DASHBOARD_DEV_MODE=1 for local dev)"
         )
-    if s.api_key and len(s.api_key) < 16:
-        raise RuntimeError("DASHBOARD_API_KEY must be at least 16 characters")
+    if s.api_key and len(s.api_key) < 32:
+        raise RuntimeError("DASHBOARD_API_KEY must be at least 32 characters")
     return s

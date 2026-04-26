@@ -5,6 +5,8 @@ exactly, so the running bot picks the change up on its next maintenance
 tick (~60s) without any IPC.
 """
 
+from __future__ import annotations
+
 import json
 import time
 

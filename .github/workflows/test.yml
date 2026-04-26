@@ -26,9 +26,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r dashboard/requirements.txt
           pip install pytest pytest-asyncio pytest-timeout hypothesis
 
       - name: Run tests
+        env:
+          # Required by dashboard.app.main module-level create_app(); the
+          # real Settings used in tests is built per-test in conftest.py.
+          DASHBOARD_API_KEY: ci-placeholder-key-must-be-32-chars-long
+          DASHBOARD_BOT_DB_PATH: /tmp/_dashboard_unused.sqlite
         run: |
           pytest -v --tb=short
 
@@ -51,4 +57,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff
       - name: Ruff check
-        run: ruff check bot tests
+        run: ruff check bot tests dashboard

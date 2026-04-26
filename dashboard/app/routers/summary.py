@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
-import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,19 +15,34 @@ from ..schemas import EquityPoint, HaltState, SummaryOut
 router = APIRouter()
 
 
+# Cache (mtime, dry_run, bankroll, path) keyed by config path so we don't
+# re-parse bot/config.yaml on every /api/summary poll.
+_config_cache: dict[str, tuple[float, Optional[bool], Optional[float], str]] = {}
+
+
 def _bot_runtime_info(request: Request) -> tuple[Optional[bool], Optional[float], Optional[str]]:
     """Returns (dry_run, starting_bankroll, bot_config_path) when the
     bot's YAML config is loadable; otherwise (None, None, None)."""
     settings = request.app.state.settings
-    if not settings.bot_config_path:
+    path = settings.bot_config_path
+    if not path:
         return None, None, None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None, None, path
+    cached = _config_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1], cached[2], cached[3]
     try:
         from bot.core.config import load_config
 
-        cfg = load_config(settings.bot_config_path)
-        return cfg.execution.dry_run, cfg.bankroll.starting_bankroll_usdc, settings.bot_config_path
+        cfg = load_config(path)
+        entry = (mtime, cfg.execution.dry_run, cfg.bankroll.starting_bankroll_usdc, path)
+        _config_cache[path] = entry
+        return entry[1], entry[2], entry[3]
     except Exception:
-        return None, None, settings.bot_config_path
+        return None, None, path
 
 
 @router.get("/api/summary", response_model=SummaryOut, dependencies=[Depends(require_api_key)])
@@ -59,8 +75,6 @@ def get_summary(request: Request, db: sqlite3.Connection = Depends(get_bot_db)) 
     daily_pnl = 0.0
     weekly_pnl = 0.0
     if anchors_raw:
-        import json
-
         try:
             anchors = json.loads(anchors_raw["value"])
             if "sod_equity" in anchors:

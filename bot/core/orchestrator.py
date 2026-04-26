@@ -409,6 +409,18 @@ class Orchestrator:
         while self._running:
             try:
                 self._evict_stale_trader_sells(time.time())
+
+                # Re-sync operator-controlled state from DB so admin CLI /
+                # dashboard halt and cutoff actions take effect without a
+                # restart. Done before evaluate_portfolio so an internal
+                # trip in this tick correctly overrides an external clear.
+                external_halt = await self._store.kv_get("global_halt_reason")
+                external_cutoffs = await self._store.load_cutoffs()
+                self._risk.refresh_external_state(
+                    global_halt_reason=external_halt,
+                    cutoffs=external_cutoffs,
+                )
+
                 self._portfolio.roll_anchors()
                 await self._portfolio.persist_anchors()
                 was_halted = self._risk.global_halted

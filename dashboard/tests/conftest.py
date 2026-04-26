@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 # Set env BEFORE importing the dashboard app modules, so module-level
 # `app = create_app()` doesn't trip the missing-API-key guard.
-os.environ.setdefault("DASHBOARD_API_KEY", "test-key-must-be-16-chars-long")
+os.environ.setdefault("DASHBOARD_API_KEY", "test-api-key-must-be-at-least-32-chars-long")
 os.environ.setdefault("DASHBOARD_BOT_DB_PATH", "/tmp/_dashboard_unused.sqlite")
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -29,7 +29,7 @@ from bot.data import datastore as bot_datastore  # noqa: E402
 from dashboard.app.config import Settings, get_settings  # noqa: E402
 from dashboard.app.main import create_app  # noqa: E402
 
-API_KEY = "test-key-must-be-16-chars-long"
+API_KEY = "test-api-key-must-be-at-least-32-chars-long"
 
 
 def _seed_bot_db(path: Path) -> sqlite3.Connection:

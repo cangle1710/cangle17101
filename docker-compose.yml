@@ -9,8 +9,11 @@ services:
       - CLOB_API_SECRET=${CLOB_API_SECRET:-}
       - CLOB_API_PASSPHRASE=${CLOB_API_PASSPHRASE:-}
     volumes:
-      - ./state:/state
-      - ./logs:/logs
+      # Bot's config uses relative paths (state/, logs/) and runs from
+      # WORKDIR=/app, so mounts have to land at /app/state and /app/logs
+      # for the host's ./state and ./logs to actually receive writes.
+      - ./state:/app/state
+      - ./logs:/app/logs
       - ./bot/config.yaml:/app/bot/config.yaml:ro
     ports:
       - "127.0.0.1:9090:9090"  # metrics + healthz exposed only on loopback
@@ -44,7 +47,9 @@ services:
     restart: unless-stopped
     environment:
       - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}
-      - DASHBOARD_BOT_DB_PATH=/state/bot.sqlite
+      # File names match what bot/config.yaml's data.db_path and
+      # logging.decisions_file resolve to under the bot's WORKDIR.
+      - DASHBOARD_BOT_DB_PATH=/state/bot_state.sqlite
       - DASHBOARD_BOT_CONFIG_PATH=/app/bot/config.yaml
       - DASHBOARD_DECISIONS_LOG_PATH=/logs/decisions.jsonl
       - DASHBOARD_AUDIT_DB_PATH=/state/dashboard_audit.sqlite

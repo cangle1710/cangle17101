@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { getApiKey, setApiKey } from "../api/client";
 
 interface Props {
@@ -6,23 +6,19 @@ interface Props {
 }
 
 export default function ApiKeyGate({ children }: Props) {
+  // The first authenticated API call validates the key — if the server
+  // returns 401, the fetch wrapper clears localStorage and the next render
+  // will fall back to this gate. No upfront probe needed.
   const [hasKey, setHasKey] = useState<boolean>(() => !!getApiKey());
   const [draft, setDraft] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!hasKey) return;
-    fetch("/api/summary", { headers: { "X-API-Key": getApiKey() ?? "" } })
-      .then((r) => {
-        if (r.status === 401) {
-          setHasKey(false);
-          setErr("API key rejected by server");
-        }
-      })
-      .catch(() => {});
-  }, [hasKey]);
 
   if (hasKey) return <>{children}</>;
+
+  const submit = () => {
+    if (!draft.trim()) return;
+    setApiKey(draft.trim());
+    setHasKey(true);
+  };
 
   return (
     <div className="gate">
@@ -37,23 +33,14 @@ export default function ApiKeyGate({ children }: Props) {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && draft.trim()) {
-            setApiKey(draft.trim());
-            setErr(null);
-            setHasKey(true);
-          }
+          if (e.key === "Enter") submit();
         }}
       />
-      {err && <div className="banner bad" style={{ marginTop: 12 }}>{err}</div>}
       <button
         className="primary"
         style={{ marginTop: 12, width: "100%" }}
         disabled={!draft.trim()}
-        onClick={() => {
-          setApiKey(draft.trim());
-          setErr(null);
-          setHasKey(true);
-        }}
+        onClick={submit}
       >
         Continue
       </button>

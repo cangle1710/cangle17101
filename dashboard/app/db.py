@@ -42,10 +42,11 @@ def open_bot_db(path: str | Path, *, read_only: bool = True) -> sqlite3.Connecti
         raise FileNotFoundError(f"bot db not found: {p}")
     if read_only:
         uri = f"file:{p}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5.0)
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     else:
-        conn = sqlite3.connect(str(p), check_same_thread=False, timeout=5.0)
+        conn = sqlite3.connect(str(p), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Wait up to 2s for the bot's writer rather than failing immediately.
     conn.execute("PRAGMA busy_timeout=2000")
     return conn
 

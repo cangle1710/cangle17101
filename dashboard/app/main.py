@@ -9,19 +9,48 @@ Run locally:
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Settings, get_settings
 from .db import assert_schema, open_audit_db, open_bot_db
 from .routers import controls, decisions, health, positions, summary, traders
 
 log = logging.getLogger("dashboard")
+access = logging.getLogger("dashboard.access")
+
+
+class AccessLogMiddleware(BaseHTTPMiddleware):
+    """Lightweight access log that NEVER records the X-API-Key header.
+
+    uvicorn's default access log already omits headers, but this middleware
+    makes the design intent explicit and gives us per-request latency.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            access.exception(
+                "%s %s -> 500 in %.1fms",
+                request.method, request.url.path, elapsed_ms,
+            )
+            raise
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        access.info(
+            "%s %s -> %d in %.1fms",
+            request.method, request.url.path, response.status_code, elapsed_ms,
+        )
+        return response
 
 
 @asynccontextmanager
@@ -62,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.add_middleware(AccessLogMiddleware)
 
     origins = settings.cors_origin_list()
     if origins:
@@ -78,18 +108,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     static_dir = Path(settings.static_dir)
     if static_dir.is_dir():
-        app.mount(
-            "/assets",
-            StaticFiles(directory=static_dir / "assets"),
-            name="assets",
-        )
+        assets = static_dir / "assets"
+        if assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str) -> FileResponse:
-            # API routes are matched before this catch-all because they're
-            # registered first; this only fires for SPA routes.
-            index = static_dir / "index.html"
-            return FileResponse(index)
+            # API routes not matched by any router are 404s — don't serve
+            # the SPA shell for missing API endpoints.
+            if full_path.startswith("api/") or full_path == "api":
+                raise HTTPException(status_code=404, detail="not found")
+            return FileResponse(static_dir / "index.html")
+    else:
+        # No SPA built — give a plain JSON 404 for unknown paths so API
+        # consumers don't get an HTML shell either.
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def no_spa(full_path: str):
+            raise HTTPException(status_code=404, detail="not found")
 
     return app
 

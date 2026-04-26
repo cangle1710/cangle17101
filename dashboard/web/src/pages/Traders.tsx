@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import ReasonModal from "../components/ReasonModal";
 import { usePolling } from "../components/usePolling";
 
 type Sort = "score" | "roi" | "pnl" | "trades";
@@ -8,16 +9,22 @@ export default function Traders() {
   const [sort, setSort] = useState<Sort>("score");
   const { data, error, loading } = usePolling(() => api.traders(sort), 5000, [sort]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [cuttingWallet, setCuttingWallet] = useState<string | null>(null);
 
-  async function toggleCutoff(wallet: string, isCut: boolean) {
+  async function clearCutoff(wallet: string) {
     setBusy(wallet);
     try {
-      if (isCut) await api.clearCutoff(wallet);
-      else {
-        const reason = prompt(`Cutoff reason for ${wallet}?`);
-        if (!reason) return;
-        await api.setCutoff(wallet, reason);
-      }
+      await api.clearCutoff(wallet);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setCutoff(wallet: string, reason: string) {
+    setBusy(wallet);
+    setCuttingWallet(null);
+    try {
+      await api.setCutoff(wallet, reason);
     } finally {
       setBusy(null);
     }
@@ -85,7 +92,7 @@ export default function Traders() {
                       <button
                         disabled={busy === t.wallet}
                         className={isCut ? "" : "danger"}
-                        onClick={() => toggleCutoff(t.wallet, isCut)}
+                        onClick={() => isCut ? clearCutoff(t.wallet) : setCuttingWallet(t.wallet)}
                       >
                         {isCut ? "uncutoff" : "cutoff"}
                       </button>
@@ -97,6 +104,15 @@ export default function Traders() {
           </table>
         </div>
       )}
+
+      <ReasonModal
+        open={!!cuttingWallet}
+        title={cuttingWallet ? `Cut off ${cuttingWallet}` : ""}
+        placeholder="reason (e.g. 5 consec losses)"
+        confirmLabel="Cutoff"
+        onCancel={() => setCuttingWallet(null)}
+        onConfirm={(reason) => cuttingWallet && setCutoff(cuttingWallet, reason)}
+      />
     </>
   );
 }

@@ -81,6 +81,43 @@ class RiskManager:
             self._trader_cutoffs[w.lower()] = r
             log.warning("Restored trader cutoff %s: %s", w, r)
 
+    def refresh_external_state(
+        self,
+        *,
+        global_halt_reason: Optional[str],
+        cutoffs: dict[str, str],
+    ) -> None:
+        """Re-sync from operator-controlled DB state (admin CLI / dashboard
+        writes to kv_state and trader_cutoffs). Called periodically by the
+        maintenance loop so admin actions take effect without a restart.
+
+        The DB is the source of truth for operator state. An internally-
+        tripped halt that has not yet been mirrored to the DB is preserved
+        — re-evaluation in the same tick will re-set it if the condition
+        still applies, so this can't accidentally resume a real risk
+        breach.
+        """
+        if global_halt_reason:
+            if not self._global_halt or self._halt_reason != global_halt_reason:
+                log.warning("External global halt: %s", global_halt_reason)
+            self._global_halt = True
+            self._halt_reason = global_halt_reason
+        else:
+            if self._global_halt and self._halt_reason:
+                log.warning("External clear of global halt (was: %s)",
+                            self._halt_reason)
+            self._global_halt = False
+            self._halt_reason = None
+
+        normalized = {w.lower(): r for w, r in cutoffs.items()}
+        added = set(normalized) - set(self._trader_cutoffs)
+        removed = set(self._trader_cutoffs) - set(normalized)
+        for w in added:
+            log.warning("External trader cutoff %s: %s", w, normalized[w])
+        for w in removed:
+            log.warning("External clear of trader cutoff %s", w)
+        self._trader_cutoffs = normalized
+
     # ----- state mutation -----
 
     def trip_global(self, reason: str) -> None:
