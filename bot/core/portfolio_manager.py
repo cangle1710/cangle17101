@@ -23,7 +23,6 @@ from ..data import DataStore
 from ..risk.risk_manager import RiskSnapshot, start_of_day, start_of_week
 from .config import BankrollConfig
 from .models import (
-    Outcome,
     Position,
     PositionStatus,
     Side,

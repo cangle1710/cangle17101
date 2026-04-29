@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from ..core.config import BotConfig
-from ..core.exit_manager import ExitAction, ExitManager
-from ..core.models import OrderBookSnapshot, Position, Side, TradeSignal
+from ..core.exit_manager import ExitManager
+from ..core.models import OrderBookSnapshot, Side, TradeSignal
 from ..core.portfolio_manager import PortfolioManager
 from ..core.position_sizer import PositionSizer
 from ..core.signal_filter import SignalFilter

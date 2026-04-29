@@ -33,14 +33,13 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 from ..core.config import BotConfig, load_config
 from ..core.models import OrderBookSnapshot, Outcome, Side, TradeSignal
 from ..core.position_sizer import PositionSizer
 from ..core.signal_filter import SignalFilter
 from ..core.trader_scorer import TraderScorer
-from ..data import DataStore
 from ..risk.risk_manager import RiskManager, RiskSnapshot
 
 log = logging.getLogger(__name__)

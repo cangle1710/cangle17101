@@ -22,7 +22,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from ..core.config import ExecutionConfig
 from ..core.models import OrderBookSnapshot, Order, Side, TradeStatus, TradeSignal

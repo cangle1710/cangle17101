@@ -17,7 +17,6 @@ code here is careful enough that the migration would be mechanical.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 

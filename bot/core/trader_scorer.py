@@ -39,6 +39,13 @@ class TraderScorer:
     ):
         self._stats: dict[str, TraderStats] = {}
         self._returns: dict[str, list[float]] = {}
+        # Per-(wallet, category) wins/losses for Bayesian shrinkage. Same
+        # trader has different edge in different market categories — this
+        # surfaces that signal. Categories come from the operator's
+        # `risk.correlation_groups` mapping (token_id -> group), and
+        # tokens not in the map fall through to per-trader-only scoring.
+        self._cat_wins: dict[tuple[str, str], int] = {}
+        self._cat_losses: dict[tuple[str, str], int] = {}
         self._min_trades_for_score = min_trades_for_score
         self._mode = mode
         # Prior for Beta(alpha, beta). Alpha=beta=1 is uniform prior.
@@ -61,8 +68,20 @@ class TraderScorer:
             # Rebuild returns from equity curve if available
             self._returns[s.wallet] = _returns_from_equity(s.equity_curve)
 
-    def record_close(self, wallet: str, notional: float, pnl: float) -> TraderStats:
-        """Record one fully-closed mirror trade for this wallet."""
+    def record_close(
+        self,
+        wallet: str,
+        notional: float,
+        pnl: float,
+        *,
+        category: Optional[str] = None,
+    ) -> TraderStats:
+        """Record one fully-closed mirror trade for this wallet.
+
+        When `category` is provided, the win/loss is also tallied against
+        the (wallet, category) pair so `score(wallet, category=...)` can
+        return a per-category Bayesian-shrunk estimate.
+        """
         wallet = wallet.lower()
         s = self.register(wallet)
 
@@ -75,6 +94,13 @@ class TraderScorer:
         else:
             s.losses += 1
             s.consecutive_losses += 1
+
+        if category:
+            key = (wallet, category)
+            if pnl > 0:
+                self._cat_wins[key] = self._cat_wins.get(key, 0) + 1
+            else:
+                self._cat_losses[key] = self._cat_losses.get(key, 0) + 1
 
         # Update equity curve with the new cumulative PnL
         new_equity = s.realized_pnl
@@ -123,17 +149,29 @@ class TraderScorer:
         sd = math.sqrt(var)
         return mean / sd if sd > 0 else 0.0
 
-    def score(self, wallet: str) -> float:
+    def score(self, wallet: str, *, category: Optional[str] = None) -> float:
         """Score in [0, 1]. Uses the composite regime by default; if the
         scorer was configured with mode='bayesian', uses Beta-posterior
-        lower-confidence-bound on win rate instead. Below
-        `min_trades_for_score`, returns a neutral prior of 0.5 so new
-        traders aren't prematurely excluded (they can still be cut by
-        the risk manager on streaks)."""
+        lower-confidence-bound on win rate instead.
+
+        When `category` is provided AND we have at least one observation
+        in that (wallet, category) bucket, the score is computed via
+        Bayesian shrinkage: the operator's category history is the prior
+        AND the wallet's GLOBAL history is the prior — combined into a
+        single Beta posterior so a trader who's brilliant on sports but
+        mediocre on macro doesn't get a one-size-fits-all number.
+
+        Below `min_trades_for_score` of GLOBAL trades, returns a neutral
+        prior of 0.5 so new traders aren't prematurely excluded (they can
+        still be cut by the risk manager on streaks).
+        """
         wallet = wallet.lower()
         s = self._stats.get(wallet)
         if s is None or s.trades < self._min_trades_for_score:
             return 0.5
+
+        if category and self._has_category_data(wallet, category):
+            return self._category_score(wallet, category)
 
         if self._mode == "bayesian":
             return self.bayesian_score(wallet)
@@ -183,6 +221,82 @@ class TraderScorer:
         stdev = math.sqrt(max(0.0, var))
         lcb = mean - self._lcb_stdev * stdev
         return max(0.0, min(1.0, lcb))
+
+    def _has_category_data(self, wallet: str, category: str) -> bool:
+        key = (wallet, category)
+        return (self._cat_wins.get(key, 0) + self._cat_losses.get(key, 0)) > 0
+
+    # How much weight the global rate gets as a soft prior on the
+    # category posterior. Higher = more shrinkage toward the global rate
+    # (better when category data is sparse). Equal to ~10 effective
+    # observations, the same threshold we use for `min_trades_for_score`.
+    _CATEGORY_PRIOR_STRENGTH = 10.0
+
+    def _category_score(self, wallet: str, category: str) -> float:
+        """Bayesian-shrinkage score for (wallet, category).
+
+        Hyperprior approach: the trader's GLOBAL win rate is the prior
+        mean, with effective strength `_CATEGORY_PRIOR_STRENGTH`. The
+        category-specific wins/losses are treated as additional
+        observations on top of that prior. This avoids the "double-
+        counting" hazard of mixing W_global and W_category directly in
+        the same Beta posterior (because every category trade is also
+        already a global trade, so adding both inflates evidence).
+
+        Posterior: Beta(α + k * p_g + W_c, β + k * (1 - p_g) + L_c)
+        where p_g = (α + W_g) / (α + β + W_g + L_g) and k =
+        _CATEGORY_PRIOR_STRENGTH.
+
+        Score: posterior mean - lcb_stdev * posterior stdev, clamped [0, 1].
+
+        A trader with 20 global wins and 1 category loss stays anchored
+        near the global rate (k effective observations of prior) until
+        enough category data accrues (W_c + L_c >> k) to shift it.
+        """
+        s = self._stats.get(wallet)
+        gw = s.wins if s else 0
+        gl = s.losses if s else 0
+        cw = self._cat_wins.get((wallet, category), 0)
+        cl = self._cat_losses.get((wallet, category), 0)
+
+        # Global rate (with α/β prior). Falls back to neutral 0.5 when
+        # the trader has no global history at all.
+        gn = self._alpha + self._beta + gw + gl
+        p_g = (self._alpha + gw) / gn if gn > 0 else 0.5
+
+        k = self._CATEGORY_PRIOR_STRENGTH
+        a = self._alpha + k * p_g + cw
+        b = self._beta + k * (1.0 - p_g) + cl
+        n = a + b
+        if n <= 0:
+            return 0.5
+        mean = a / n
+        var = (mean * (1 - mean)) / (n + 1)
+        stdev = math.sqrt(max(0.0, var))
+        lcb = mean - self._lcb_stdev * stdev
+        return max(0.0, min(1.0, lcb))
+
+    def category_breakdown(self, wallet: str) -> dict[str, dict[str, float]]:
+        """All (category, {wins, losses, score}) for a wallet."""
+        wallet = wallet.lower()
+        out: dict[str, dict[str, float]] = {}
+        for (w, cat), wins in self._cat_wins.items():
+            if w != wallet:
+                continue
+            out[cat] = {
+                "wins": wins,
+                "losses": self._cat_losses.get((w, cat), 0),
+                "score": self._category_score(w, cat),
+            }
+        for (w, cat), losses in self._cat_losses.items():
+            if w != wallet or cat in out:
+                continue
+            out[cat] = {
+                "wins": self._cat_wins.get((w, cat), 0),
+                "losses": losses,
+                "score": self._category_score(w, cat),
+            }
+        return out
 
     def rank(self) -> list[tuple[str, float]]:
         ranked = [(s.wallet, self.score(s.wallet)) for s in self._stats.values()]

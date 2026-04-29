@@ -15,7 +15,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Optional
 
 from ..core.models import (
     Order,
@@ -23,7 +23,6 @@ from ..core.models import (
     Position,
     PositionStatus,
     Side,
-    TradeStatus,
     TraderStats,
 )
 

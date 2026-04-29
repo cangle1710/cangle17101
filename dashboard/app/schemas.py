@@ -111,3 +111,12 @@ class ExecutionModeOut(BaseModel):
 
 class ExecutionModeIn(BaseModel):
     mode: str  # "paper" or "live"
+
+
+class CopyModeOut(BaseModel):
+    effective: str  # "smart" or "blind"
+    override: Optional[str] = None  # what's stored in kv_state, if any
+
+
+class CopyModeIn(BaseModel):
+    mode: str  # "smart" or "blind"

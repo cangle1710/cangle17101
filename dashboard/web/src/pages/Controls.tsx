@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type ExecutionMode } from "../api/client";
+import { api, type CopyMode, type ExecutionMode } from "../api/client";
 import { usePolling } from "../components/usePolling";
 
 export default function Controls() {
@@ -11,15 +11,43 @@ export default function Controls() {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [mode, setMode] = useState<ExecutionMode | null>(null);
+  const [copy, setCopy] = useState<CopyMode | null>(null);
 
   useEffect(() => {
     api.executionMode().then(setMode).catch(() => {});
+    api.copyMode().then(setCopy).catch(() => {});
   }, []);
 
   async function refreshMode() {
     try {
       setMode(await api.executionMode());
     } catch {}
+  }
+
+  async function refreshCopy() {
+    try {
+      setCopy(await api.copyMode());
+    } catch {}
+  }
+
+  async function doSetCopy(target: "smart" | "blind") {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      const next = await api.setCopyMode(target);
+      setCopy(next);
+      setMsg(`copy mode = ${next.effective}`);
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function doClearCopy() {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      const next = await api.clearCopyMode();
+      setCopy(next);
+      setMsg("copy override cleared (default smart)");
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
   }
 
   async function doSetHalt() {
@@ -90,6 +118,48 @@ export default function Controls() {
 
       {msg && <div className="banner good">{msg}</div>}
       {err && <div className="banner bad">{err}</div>}
+
+      <div className="panel">
+        <h2>Copy mode</h2>
+        {copy ? (
+          <>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+              Currently <strong>{copy.effective.toUpperCase()}</strong>
+              {copy.override && <span className="muted"> · override: {copy.override}</span>}.
+              {" "}<strong>SMART</strong> uses per-(trader, market category) Bayesian-shrinkage
+              scoring AND subtracts the rolling adverse-selection drift penalty.
+              {" "}<strong>BLIND</strong> ignores both — the bot copies every signal that passes
+              the basic filter, weighted only by the trader's global score.
+              {" "}Use BLIND as the unfiltered baseline when A/B-ing the smart layer.
+              {" "}Bot picks up changes within ~60 s.
+            </p>
+            <div className="row">
+              <button
+                className="primary"
+                disabled={busy || copy.effective === "smart"}
+                onClick={() => doSetCopy("smart")}
+              >
+                Smart (ML-assisted)
+              </button>
+              <button
+                disabled={busy || copy.effective === "blind"}
+                onClick={() => doSetCopy("blind")}
+              >
+                Blind (copy all)
+              </button>
+              <button
+                disabled={busy || copy.override === null}
+                onClick={doClearCopy}
+              >
+                Clear override
+              </button>
+              <button onClick={refreshCopy} style={{ marginLeft: "auto" }}>Refresh</button>
+            </div>
+          </>
+        ) : (
+          <div className="muted">loading…</div>
+        )}
+      </div>
 
       <div className="panel">
         <h2>Execution mode</h2>

@@ -28,9 +28,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from typing import Optional, Protocol
+
 from .config import SizingConfig
 from .models import Side, TradeSignal
 from .trader_scorer import TraderScorer
+
+
+class _DriftSource(Protocol):
+    def drift_penalty(self, wallet: str, token_id: str) -> float: ...
 
 log = logging.getLogger(__name__)
 
@@ -44,20 +50,73 @@ class SizingDecision:
     kelly_applied: float
     implied_edge: float
     cap_reason: str | None = None
+    drift_penalty: float = 0.0
+    category: Optional[str] = None
 
     @classmethod
-    def zero(cls, reason: str, *, price: float = 0.0) -> "SizingDecision":
+    def zero(
+        cls,
+        reason: str,
+        *,
+        price: float = 0.0,
+        category: Optional[str] = None,
+        drift_penalty: float = 0.0,
+        implied_edge: float = 0.0,
+    ) -> "SizingDecision":
         return cls(
             notional=0.0, shares=0.0, limit_price=price,
-            kelly_full=0.0, kelly_applied=0.0, implied_edge=0.0,
+            kelly_full=0.0, kelly_applied=0.0, implied_edge=implied_edge,
             cap_reason=reason,
+            drift_penalty=drift_penalty,
+            category=category,
         )
 
 
 class PositionSizer:
-    def __init__(self, config: SizingConfig, scorer: TraderScorer):
+    # Operator-controlled "copy mode" toggled at runtime via the dashboard:
+    # SMART = consult per-(trader, category) score + adverse-selection drift
+    # BLIND = ignore both; size purely from global trader score + ROI
+    SMART = "smart"
+    BLIND = "blind"
+
+    def __init__(
+        self,
+        config: SizingConfig,
+        scorer: TraderScorer,
+        *,
+        drift_source: Optional[_DriftSource] = None,
+        category_for_token: Optional[dict[str, str]] = None,
+        copy_mode: str = SMART,
+    ):
         self._cfg = config
         self._scorer = scorer
+        # Optional adverse-selection observer. When provided AND copy_mode
+        # is SMART, we subtract the rolling per-(wallet, token) drift
+        # penalty from implied_edge so sizes shrink on flow we're
+        # persistently being picked off on.
+        self._drift_source = drift_source
+        # token_id -> category name. Used to route the scorer to the
+        # per-(trader, category) Bayesian-shrinkage estimate. Reuses the
+        # operator's `risk.correlation_groups` mapping by default.
+        self._category_for_token = category_for_token or {}
+        self._copy_mode = copy_mode if copy_mode in (self.SMART, self.BLIND) else self.SMART
+
+    @property
+    def copy_mode(self) -> str:
+        return self._copy_mode
+
+    def set_copy_mode(self, mode: str) -> None:
+        """Runtime toggle. Anything other than SMART/BLIND is ignored
+        (defensive: untrusted DB value) and logged so operators see
+        when something upstream wrote garbage to kv_state."""
+        if mode in (self.SMART, self.BLIND):
+            self._copy_mode = mode
+            return
+        log.warning(
+            "PositionSizer.set_copy_mode: ignoring invalid mode %r "
+            "(expected 'smart' or 'blind'); current mode unchanged: %s",
+            mode, self._copy_mode,
+        )
 
     def size(
         self,
@@ -85,7 +144,12 @@ class PositionSizer:
             px = 1.0 - px
 
         # ----- edge estimation -----
-        score = self._scorer.score(signal.wallet)
+        smart = self._copy_mode == self.SMART
+        # In SMART mode the scorer is asked for the per-category Bayesian
+        # estimate; in BLIND mode we use the flat global score so the bot
+        # behaves like a naive 1:1 copier.
+        category = self._category_for_token.get(signal.token_id) if smart else None
+        score = self._scorer.score(signal.wallet, category=category)
         stats = self._scorer.get(signal.wallet)
         # Bound ROI contribution so a small lucky sample can't dominate.
         roi = stats.roi if stats else 0.0
@@ -97,6 +161,18 @@ class PositionSizer:
         # Blend: trader conviction * weight + ROI * (1 - weight)
         w = _clamp(self._cfg.trader_edge_weight, 0.0, 1.0)
         implied_edge = w * signed_score + (1 - w) * roi
+
+        # Adverse-selection feedback: subtract the rolling drift penalty
+        # for this (wallet, token) pair. Closes the loop on flow we're
+        # being picked off on without manual intervention. Skipped in
+        # BLIND mode so the operator can A/B against the unfiltered copier.
+        drift_penalty = 0.0
+        if smart and self._drift_source is not None:
+            drift_penalty = self._drift_source.drift_penalty(
+                signal.wallet, signal.token_id,
+            )
+            implied_edge -= drift_penalty
+
         implied_edge = _clamp(
             implied_edge,
             -self._cfg.max_implied_edge,
@@ -110,7 +186,11 @@ class PositionSizer:
 
         kelly = (b * p_true - q) / b  # full-Kelly stake fraction
         if kelly <= 0:
-            return SizingDecision.zero("nonpositive_kelly", price=reference_price)
+            return SizingDecision.zero(
+                "nonpositive_kelly", price=reference_price,
+                category=category, drift_penalty=drift_penalty,
+                implied_edge=implied_edge,
+            )
 
         kelly_applied = kelly * _clamp(self._cfg.kelly_fraction, 0.0, 1.0)
 
@@ -143,6 +223,8 @@ class PositionSizer:
         if notional < self._cfg.min_notional:
             return SizingDecision.zero(
                 "below_min_notional", price=reference_price,
+                category=category, drift_penalty=drift_penalty,
+                implied_edge=implied_edge,
             )
 
         shares = notional / reference_price if reference_price > 0 else 0.0
@@ -155,6 +237,8 @@ class PositionSizer:
             kelly_applied=kelly_applied,
             implied_edge=implied_edge,
             cap_reason=cap_reason,
+            drift_penalty=drift_penalty,
+            category=category,
         )
 
 

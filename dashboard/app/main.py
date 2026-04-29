@@ -23,8 +23,8 @@ from .config import Settings, get_settings
 from .db import assert_schema, open_audit_db, open_bot_db
 from .routers import (
     config as config_router,
-    controls, decisions, execution_mode, health, positions, replay,
-    summary, traders,
+    controls, copy_mode, decisions, execution_mode, health, positions,
+    replay, summary, traders,
 )
 
 log = logging.getLogger("dashboard")
@@ -108,7 +108,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     for r in (health.router, summary.router, positions.router,
               traders.router, decisions.router, controls.router,
-              execution_mode.router, replay.router, config_router.router):
+              execution_mode.router, copy_mode.router, replay.router,
+              config_router.router):
         app.include_router(r)
 
     static_dir = Path(settings.static_dir)

@@ -1,5 +1,6 @@
 httpx>=0.27
 PyYAML>=6.0
+websockets>=12.0
 
 # Optional: install for real CLOB signing instead of the dry-run signer.
 # py-clob-client>=0.19

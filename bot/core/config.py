@@ -41,12 +41,21 @@ class TrackerConfig:
     poll_interval_seconds: float = 2.0
     data_api_base: str = "https://data-api.polymarket.com"
     max_trade_age_seconds: float = 30.0
+    # "poll" (default) uses the data-api with poll_interval_seconds latency,
+    # or "websocket" subscribes to a CLOB-style stream for sub-second
+    # latency. The single biggest edge in a copy-trading bot.
+    source: str = "poll"
+    websocket_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
     def __post_init__(self):
         if not self.wallets:
             raise ValueError("config.tracker.wallets: must not be empty")
         _check_positive("tracker.poll_interval_seconds", self.poll_interval_seconds)
         _check_positive("tracker.max_trade_age_seconds", self.max_trade_age_seconds)
+        if self.source not in ("poll", "websocket"):
+            raise ValueError(
+                f"tracker.source must be 'poll' or 'websocket', got {self.source!r}"
+            )
 
 
 @dataclass

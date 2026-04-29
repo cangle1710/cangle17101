@@ -68,7 +68,19 @@ export const api = {
       body: JSON.stringify(file ? { file } : {}),
     }),
   config: () => request<Record<string, unknown>>("/api/config"),
+  copyMode: () => request<CopyMode>("/api/copy_mode"),
+  setCopyMode: (mode: "smart" | "blind") =>
+    request<CopyMode>("/api/copy_mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  clearCopyMode: () => request<CopyMode>("/api/copy_mode", { method: "DELETE" }),
 };
+
+export interface CopyMode {
+  effective: "smart" | "blind";
+  override: "smart" | "blind" | null;
+}
 
 export interface ReplayResult {
   file: string;

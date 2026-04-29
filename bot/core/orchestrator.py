@@ -32,7 +32,7 @@ from .config import BotConfig
 from .exit_manager import ExitAction, ExitManager
 from .http import HttpClient
 from .logging_setup import DecisionLogger
-from .models import Outcome, Position, Side, TradeSignal
+from .models import Position, Side, TradeSignal
 from .portfolio_manager import PortfolioManager
 from .position_sizer import PositionSizer
 from .signal_filter import SignalFilter
@@ -95,6 +95,18 @@ class Orchestrator:
         cutoffs = await self._store.load_cutoffs()
         halt = await self._store.kv_get("global_halt_reason")
         self._risk.hydrate(global_halt_reason=halt, cutoffs=cutoffs)
+
+        # Restore adverse-selection drift history so we don't lose the
+        # feedback signal across restarts. The observer ignores garbage
+        # silently — schema changes won't crash startup.
+        if self._adverse_selection is not None:
+            drift_raw = await self._store.kv_get("adverse_drift")
+            if drift_raw:
+                self._adverse_selection.from_state(drift_raw)
+                log.info(
+                    "Restored adverse-selection drift history (%d pairs)",
+                    len(self._adverse_selection._drift_history),
+                )
 
         # Outbox-style recovery scan: any signal whose claim was never
         # marked `done` before a previous shutdown is surfaced in logs
@@ -246,6 +258,8 @@ class Orchestrator:
         )
 
         # Schedule an adverse-selection check if the observer is wired.
+        # Wallet is attached so per-(wallet, token) drift can feed back
+        # into the sizer for that pair.
         if self._adverse_selection is not None:
             self._adverse_selection.schedule(
                 position_id=position.position_id,
@@ -253,6 +267,7 @@ class Orchestrator:
                 token_id=signal.token_id,
                 side=signal.side,
                 fill_price=result.avg_price,
+                wallet=signal.wallet,
             )
 
         M.SIGNALS_COPIED.inc()
@@ -370,13 +385,18 @@ class Orchestrator:
             size=result.filled_size,
         )
 
-        # Update trader stats & risk.
+        # Update trader stats & risk. Pass the market category (from
+        # risk.correlation_groups) so the scorer can maintain
+        # per-(trader, category) Bayesian-shrinkage statistics for SMART
+        # mode.
         if closed is not None and closed.closed_at is not None:
             notional = closed.entry_price * (closed.size + result.filled_size)
+            category = self._cfg.risk.correlation_groups.get(closed.token_id)
             stats = self._scorer.record_close(
                 wallet=closed.source_wallet,
                 notional=max(notional, 1e-9),
                 pnl=closed.realized_pnl,
+                category=category,
             )
             await self._store.upsert_trader_stats(stats)
             cutoff = self._risk.evaluate_trader_stats(stats)
@@ -428,6 +448,13 @@ class Orchestrator:
                 mode = await self._store.kv_get("execution_mode")
                 self._clob.set_force_paper(mode == "paper")
 
+                # Runtime smart-vs-blind copy mode. kv_state['copy_mode']
+                # = "blind" disables per-(trader, category) shrinkage AND
+                # adverse-selection drift penalty so the bot acts as a
+                # naive 1:1 copier; "smart" (or absent) re-enables both.
+                copy_mode = await self._store.kv_get("copy_mode") or "smart"
+                self._sizer.set_copy_mode(copy_mode)
+
                 self._portfolio.roll_anchors()
                 await self._portfolio.persist_anchors()
                 was_halted = self._risk.global_halted
@@ -451,6 +478,12 @@ class Orchestrator:
                 # seconds per scheduled fill. Best-effort.
                 if self._adverse_selection is not None:
                     await self._adverse_selection.run_due()
+                    # Persist drift history so a restart doesn't wipe the
+                    # feedback signal we've accumulated. Cheap; small JSON.
+                    await self._store.kv_set(
+                        "adverse_drift",
+                        self._adverse_selection.to_state(),
+                    )
             except Exception:
                 log.exception("maintenance loop error")
             await asyncio.sleep(60.0)

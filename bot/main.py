@@ -24,6 +24,7 @@ from .core.position_sizer import PositionSizer
 from .core.signal_filter import SignalFilter
 from .core.trader_scorer import TraderScorer
 from .core.wallet_tracker import WalletTracker
+from .core.websocket_tracker import WebsocketSignalSource
 from .data import DataStore
 from .execution import ClobClient, ExecutionEngine
 from .observability import ObservabilityServer, registry
@@ -114,12 +115,21 @@ async def _amain(config_path: Path) -> int:
         bayesian_lcb_stdev=cfg.scoring.bayesian_lcb_stdev,
     )
     sig_filter = SignalFilter(cfg.filter, scorer)
-    sizer = PositionSizer(cfg.sizing, scorer)
     risk = RiskManager(cfg.risk, kill_switch_file=cfg.safety.kill_switch_file or None)
     portfolio = PortfolioManager(cfg.bankroll, store)
     exit_mgr = ExitManager(cfg.exit)
 
-    tracker = WalletTracker(cfg.tracker, http, demo=cfg.demo)
+    if cfg.tracker.source == "websocket" and not cfg.demo.enabled:
+        log.warning(
+            "Using WebSocket signal source (sub-second latency) at %s",
+            cfg.tracker.websocket_url,
+        )
+        tracker = WebsocketSignalSource(
+            url=cfg.tracker.websocket_url,
+            wallets=cfg.tracker.wallets,
+        )
+    else:
+        tracker = WalletTracker(cfg.tracker, http, demo=cfg.demo)
     clob = ClobClient(cfg.execution, http, demo=cfg.demo)
     execution = ExecutionEngine(cfg.execution, clob)
 
@@ -137,6 +147,15 @@ async def _amain(config_path: Path) -> int:
             clob=clob,
             decisions=decisions,
         )
+
+    # Sizer wires up drift feedback (closes the loop on adverse selection)
+    # and the per-token category map (drives per-(trader, category)
+    # Bayesian shrinkage). Both are gated by copy_mode at runtime.
+    sizer = PositionSizer(
+        cfg.sizing, scorer,
+        drift_source=adverse_selection,
+        category_for_token=cfg.risk.correlation_groups,
+    )
 
     orch = Orchestrator(
         cfg,
