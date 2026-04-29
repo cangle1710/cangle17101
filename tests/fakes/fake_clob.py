@@ -45,6 +45,13 @@ class FakeClobClient:
         self.cancel_success: bool = True
         self.place_delay: float = 0.0
         self.book_exception: Optional[Exception] = None
+        # Mirror the runtime-mode interface that the real ClobClient exposes;
+        # tests can flip this to verify ExecutionEngine logging/branching.
+        self.force_paper: bool = False
+        self.config_allows_live: bool = True
+
+    def set_force_paper(self, paper: bool) -> None:
+        self.force_paper = bool(paper)
 
     def set_book(self, token_id: str, book: OrderBookSnapshot) -> None:
         self.books[token_id] = book

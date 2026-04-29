@@ -171,6 +171,38 @@ simulator for more realism.
 
 ## Operations
 
+### Paper vs live trading
+
+Paper mode is the default — `execution.dry_run: true` in `bot/config.yaml`
+means the bot tracks real Polymarket prices but the `_dry_run_signer`
+simulates fills locally; nothing is signed or sent to the CLOB. You can
+also flip between paper and live at runtime from the dashboard
+(`/api/execution_mode`); the YAML's `dry_run` is the ceiling — operator
+overrides cannot escalate beyond it.
+
+### Demo mode (offline test loop)
+
+Polymarket has no testnet. To exercise the full pipeline without any
+network access — useful for local development, demos, or sandboxed
+environments — set `demo.enabled: true` in `bot/config.yaml`. The
+WalletTracker emits synthetic TradeSignals from the configured demo
+wallets/markets at the configured rate, the ClobClient serves synthetic
+order books for those tokens, and (because dry_run defaults to true)
+fills are simulated locally. On startup, trader_stats are auto-seeded
+with positive history for demo wallets so the sizer produces non-zero
+positions. The dashboard sees live activity within seconds.
+
+```yaml
+demo:
+  enabled: true
+  signals_per_minute: 30.0
+  wallets:
+    - "0xdemo000000000000000000000000000000000001"
+    - "0xdemo000000000000000000000000000000000002"
+  markets:
+    - {market_id: "demo-trump-2028", token_id: "demo-tok-trump-yes", price: 0.42, outcome: "YES", liquidity: 30000}
+```
+
 ### Metrics & health
 
 When `observability.enabled` is true (default), the bot exposes a tiny
@@ -222,6 +254,33 @@ On startup the bot prints a loud banner indicating which mode it's in.
 When `execution.dry_run: false`, it waits
 `safety.live_mode_confirm_delay_seconds` (default 5s) before starting
 the pipeline, giving you time to Ctrl+C if it was left off by accident.
+
+### Web dashboard
+
+A FastAPI + React dashboard ships alongside the bot in `dashboard/`. It
+reads the bot's SQLite state for live KPIs (equity, P&L, open positions,
+ranked traders, decision feed) and lets you flip the same admin controls
+the CLI exposes (halt/resume, trader cutoff/uncutoff). The bot picks
+those changes up on its next maintenance tick (~60s) — no restart, no IPC.
+
+Local dev:
+
+```
+cd dashboard/web && npm install && npm run build && cd -
+pip install -r dashboard/requirements.txt
+DASHBOARD_API_KEY=$(openssl rand -hex 24) \
+DASHBOARD_BOT_DB_PATH=state/bot.sqlite \
+DASHBOARD_BOT_CONFIG_PATH=bot/config.yaml \
+DASHBOARD_DECISIONS_LOG_PATH=logs/decisions.jsonl \
+uvicorn dashboard.app.main:app --host 127.0.0.1 --port 8080
+```
+
+In Docker, `docker compose up dashboard` brings it up on
+`127.0.0.1:8080` next to the existing bot/Prometheus/Grafana stack.
+Authenticate with the API key from `DASHBOARD_API_KEY`. The dashboard
+never modifies the bot's source — it talks to the shared SQLite via
+WAL-mode reads and writes only the same `kv_state` / `trader_cutoffs`
+tables the CLI does.
 
 ### Regression replay
 

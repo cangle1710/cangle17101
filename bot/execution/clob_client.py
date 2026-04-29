@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from ..core.config import ExecutionConfig
+from ..core.config import DemoConfig, ExecutionConfig
 from ..core.http import HttpClient
 from ..core.models import OrderBookSnapshot, Side
 
@@ -53,14 +53,64 @@ class ClobClient:
         config: ExecutionConfig,
         http: HttpClient,
         signer: Optional[OrderSigner] = None,
+        demo: Optional[DemoConfig] = None,
     ):
         self._cfg = config
         self._http = http
-        self._signer = signer or _dry_run_signer(config)
+        # The "live" signer (real or injected). When config.dry_run=true we
+        # never construct a real signer; the ceiling is paper.
+        self._live_signer = signer or _dry_run_signer(config)
+        # The paper signer is always available so an operator can force
+        # paper at runtime without restart.
+        self._paper_signer = _dry_run_signer(config)
+        # Runtime mode. Starts at the YAML ceiling (paper if dry_run=true).
+        self._force_paper = bool(config.dry_run)
+        # Demo mode: serve synthetic books for known demo tokens so the
+        # full pipeline can run without touching polymarket.com.
+        self._demo = demo if demo and demo.enabled else None
+        self._demo_books: dict[str, "OrderBookSnapshot"] = {}
+        if self._demo:
+            for m in self._demo.markets:
+                half = m.price * m.spread_pct
+                self._demo_books[m.token_id] = OrderBookSnapshot(
+                    market_id=m.market_id,
+                    token_id=m.token_id,
+                    best_bid=max(0.01, m.price - half),
+                    best_ask=min(0.99, m.price + half),
+                    bid_size=m.liquidity,
+                    ask_size=m.liquidity,
+                )
+
+    # ----- runtime mode (paper vs live) -----
+
+    @property
+    def force_paper(self) -> bool:
+        """True if the next signed call will go through the paper signer."""
+        return self._force_paper
+
+    @property
+    def config_allows_live(self) -> bool:
+        """False when YAML pinned dry_run=true; the ceiling can't be lifted
+        without an explicit config edit + restart."""
+        return not self._cfg.dry_run
+
+    def set_force_paper(self, paper: bool) -> None:
+        """Flip runtime mode. Clamped to YAML's dry_run — calling
+        set_force_paper(False) when config.dry_run=true is a no-op so the
+        operator can't accidentally go live via a UI/DB toggle."""
+        if self._cfg.dry_run:
+            self._force_paper = True
+            return
+        self._force_paper = bool(paper)
+
+    def _signer_for_call(self) -> OrderSigner:
+        return self._paper_signer if self._force_paper else self._live_signer
 
     # ----- public reads -----
 
     async def order_book(self, token_id: str) -> OrderBookSnapshot:
+        if token_id in self._demo_books:
+            return self._demo_books[token_id]
         url = f"{self._cfg.clob_base_url.rstrip('/')}/book"
         payload = await self._http.get_json(url, params={"token_id": token_id})
         return _parse_book(payload, token_id)
@@ -100,12 +150,12 @@ class ClobClient:
             "client_order_id": client_order_id or str(uuid.uuid4()),
             "ts": time.time(),
         }
-        raw = await self._signer(order)
+        raw = await self._signer_for_call()(order)
         return _parse_place_response(raw)
 
     async def cancel(self, order_id: str) -> bool:
         try:
-            raw = await self._signer({
+            raw = await self._signer_for_call()({
                 "cancel_order_id": order_id, "ts": time.time(),
             })
             return bool(raw.get("success", True))

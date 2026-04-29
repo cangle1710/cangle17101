@@ -102,3 +102,21 @@ adverse_selection:
   # the fill price. Recorded per-market so you can spot picked-off flow.
   enabled: true
   check_after_seconds: 30.0
+
+# Demo / synthetic-signal mode for end-to-end testing without
+# polymarket.com network access. When enabled, the WalletTracker emits
+# fake TradeSignals at the configured rate and ClobClient serves
+# synthetic order books for the listed token_ids. Combine with
+# execution.dry_run=true (the default) for a fully offline pipeline.
+demo:
+  enabled: false           # flip to true to run the bot fully offline
+  signals_per_minute: 30.0
+  sell_probability: 0.20
+  # seed: 42                # uncomment for reproducible signal sequences
+  wallets:
+    - "0xdemo000000000000000000000000000000000001"
+    - "0xdemo000000000000000000000000000000000002"
+  markets:
+    - {market_id: "demo-trump-2028", token_id: "demo-tok-trump-yes", price: 0.42, outcome: "YES", liquidity: 30000}
+    - {market_id: "demo-eth-100k",   token_id: "demo-tok-eth-yes",   price: 0.18, outcome: "YES", liquidity: 50000}
+    - {market_id: "demo-fed-cut",    token_id: "demo-tok-fed-no",    price: 0.65, outcome: "NO",  liquidity: 20000}

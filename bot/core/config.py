@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -264,6 +264,56 @@ class DataConfig:
 
 
 @dataclass
+class DemoMarket:
+    """A synthetic market used by demo mode. The bot's filter/sizer/risk
+    pipeline runs against these as if they were real Polymarket tokens,
+    but order books and fills are simulated locally."""
+    market_id: str
+    token_id: str
+    price: float = 0.50
+    outcome: str = "YES"  # YES or NO
+    # Top-of-book size (in shares). Default sized so notional comfortably
+    # clears the default filter.min_liquidity_usdc=2000 even at low prices.
+    liquidity: float = 25000.0
+    spread_pct: float = 0.01  # half-spread around `price`
+
+    def __post_init__(self):
+        _check_range(f"demo.markets[{self.market_id}].price", self.price, low=0, high=1)
+        if self.outcome not in ("YES", "NO"):
+            raise ValueError(f"demo market outcome must be YES or NO, got {self.outcome!r}")
+        _check_positive(f"demo.markets[{self.market_id}].liquidity", self.liquidity)
+        _check_range(f"demo.markets[{self.market_id}].spread_pct", self.spread_pct, low=0, high=0.5)
+
+
+@dataclass
+class DemoConfig:
+    """Synthetic signal source for end-to-end testing without polymarket
+    network access. Combine with execution.dry_run=true (the default) to
+    run the full bot pipeline on simulated data."""
+    enabled: bool = False
+    signals_per_minute: float = 6.0
+    wallets: list[str] = field(default_factory=list)
+    markets: list[DemoMarket] = field(default_factory=list)
+    # Probability that a synthetic signal is a SELL vs BUY (default mostly buys
+    # so positions actually accumulate).
+    sell_probability: float = 0.2
+    # Random seed for reproducible signal sequences (None = nondeterministic).
+    seed: Optional[int] = None
+    # On startup, if no trader_stats exist for a demo wallet, seed it with
+    # synthetic positive history so the scorer/sizer produce non-zero size.
+    # Without this, demo signals get rejected with `nonpositive_kelly`.
+    auto_seed_traders: bool = True
+
+    def __post_init__(self):
+        _check_positive("demo.signals_per_minute", self.signals_per_minute)
+        _check_range("demo.sell_probability", self.sell_probability, low=0, high=1)
+        if self.enabled and not self.markets:
+            raise ValueError("demo.enabled=true requires at least one demo.markets entry")
+        if self.enabled and not self.wallets:
+            raise ValueError("demo.enabled=true requires at least one demo.wallets entry")
+
+
+@dataclass
 class BotConfig:
     tracker: TrackerConfig
     filter: FilterConfig
@@ -279,6 +329,7 @@ class BotConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     aggregation: AggregationConfig = field(default_factory=AggregationConfig)
     adverse_selection: AdverseSelectionConfig = field(default_factory=AdverseSelectionConfig)
+    demo: DemoConfig = field(default_factory=DemoConfig)
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -297,6 +348,10 @@ def load_config(path: str | Path) -> BotConfig:
     if "wallets" not in tracker_section:
         raise ValueError("config.tracker.wallets is required")
 
+    demo_raw = dict(raw.get("demo") or {})
+    if "markets" in demo_raw:
+        demo_raw["markets"] = [DemoMarket(**m) for m in demo_raw["markets"]]
+
     return BotConfig(
         tracker=_build(tracker_section, TrackerConfig),
         filter=_build(raw.get("filter"), FilterConfig),
@@ -312,10 +367,11 @@ def load_config(path: str | Path) -> BotConfig:
         bankroll=_build(raw.get("bankroll"), BankrollConfig),
         logging=_build(raw.get("logging"), LoggingConfig),
         data=_build(raw.get("data"), DataConfig),
+        demo=DemoConfig(**demo_raw),
         extras={k: v for k, v in raw.items() if k not in {
             "tracker", "filter", "sizing", "risk", "execution",
             "exit", "bankroll", "logging", "data", "observability", "safety",
-            "scoring", "aggregation", "adverse_selection",
+            "scoring", "aggregation", "adverse_selection", "demo",
         }},
     )
 

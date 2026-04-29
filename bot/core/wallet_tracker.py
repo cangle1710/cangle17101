@@ -11,19 +11,26 @@ Strategy (in order of preference):
 
 Signals emitted here are *candidates*. Dedup, filtering, scoring, sizing and
 risk checks all happen downstream in the pipeline.
+
+When `demo.enabled: true` is set in config, the tracker emits synthetic
+signals from the configured demo wallets/markets at the configured rate
+instead of polling the data API. Combine with execution.dry_run=true to
+run the full pipeline without external network access.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
+import uuid
 from collections import OrderedDict
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
-from .config import TrackerConfig
+from .config import DemoConfig, TrackerConfig
 from .http import HttpClient
-from .models import TradeSignal
+from .models import Outcome, Side, TradeSignal
 from .trade_parser import dedupe_key, parse_trades
 
 log = logging.getLogger(__name__)
@@ -35,6 +42,7 @@ class WalletTracker:
         config: TrackerConfig,
         http: HttpClient,
         seen_cache_size: int = 5000,
+        demo: Optional[DemoConfig] = None,
     ):
         self._cfg = config
         self._http = http
@@ -43,10 +51,24 @@ class WalletTracker:
         # just avoids re-parsing the same JSON on back-to-back polls.
         self._seen: "OrderedDict[str, float]" = _bounded_set(seen_cache_size)
         self._running = False
+        self._demo = demo
+        self._demo_rng: Optional[random.Random] = None
+        if demo and demo.enabled:
+            self._demo_rng = random.Random(demo.seed)
 
     async def stream(self) -> AsyncIterator[TradeSignal]:
         """Async generator yielding new trade signals."""
         self._running = True
+        if self._demo and self._demo.enabled:
+            log.warning(
+                "WalletTracker DEMO MODE: %d demo wallets, %d markets, %.1f signals/min",
+                len(self._demo.wallets), len(self._demo.markets),
+                self._demo.signals_per_minute,
+            )
+            async for sig in self._demo_stream():
+                yield sig
+            return
+
         log.info("WalletTracker watching %d wallets", len(self._wallets))
         while self._running:
             batch_start = time.time()
@@ -67,6 +89,38 @@ class WalletTracker:
             elapsed = time.time() - batch_start
             sleep_for = max(0.0, self._cfg.poll_interval_seconds - elapsed)
             await asyncio.sleep(sleep_for)
+
+    async def _demo_stream(self) -> AsyncIterator[TradeSignal]:
+        """Emit synthetic TradeSignals on a Poisson-ish schedule."""
+        assert self._demo is not None and self._demo_rng is not None
+        interval = 60.0 / max(self._demo.signals_per_minute, 0.1)
+        wallets = [w.lower() for w in self._demo.wallets]
+        markets = self._demo.markets
+        sell_p = self._demo.sell_probability
+        rng = self._demo_rng
+        while self._running:
+            await asyncio.sleep(interval * (0.5 + rng.random()))
+            if not self._running:
+                break
+            wallet = rng.choice(wallets)
+            mkt = rng.choice(markets)
+            side = Side.SELL if rng.random() < sell_p else Side.BUY
+            # Walk the price slightly so each signal isn't identical.
+            jitter = (rng.random() - 0.5) * mkt.spread_pct
+            price = max(0.01, min(0.99, mkt.price + jitter))
+            size = rng.choice([50.0, 100.0, 200.0, 400.0])
+            sig = TradeSignal(
+                wallet=wallet,
+                market_id=mkt.market_id,
+                token_id=mkt.token_id,
+                outcome=Outcome(mkt.outcome),
+                side=side,
+                price=round(price, 4),
+                size=size,
+                timestamp=time.time(),
+                tx_hash=f"demo-{uuid.uuid4().hex[:16]}",
+            )
+            yield sig
 
     def stop(self) -> None:
         self._running = False

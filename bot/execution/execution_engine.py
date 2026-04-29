@@ -70,8 +70,8 @@ class ExecutionEngine:
             return ExecutionResult(TradeStatus.REJECTED, 0.0, 0.0, 0.0, 0,
                                    "zero_size", [])
 
-        if self._cfg.dry_run:
-            log.info("DRY RUN execute %s %.2f @ %.4f (token=%s)",
+        if self._clob.force_paper:
+            log.info("PAPER execute %s %.2f @ %.4f (token=%s)",
                      signal.side.value, target_shares, target_price,
                      signal.token_id)
 

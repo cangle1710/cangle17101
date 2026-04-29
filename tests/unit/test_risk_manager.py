@@ -35,6 +35,36 @@ def test_deny_on_global_halt():
     assert r.global_halted
 
 
+def test_refresh_external_state_sets_and_clears_halt():
+    r = RiskManager(RiskConfig())
+    assert not r.global_halted
+
+    r.refresh_external_state(global_halt_reason="ops maintenance", cutoffs={})
+    assert r.global_halted
+    assert r._halt_reason == "ops maintenance"
+
+    r.refresh_external_state(global_halt_reason=None, cutoffs={})
+    assert not r.global_halted
+    assert r._halt_reason is None
+
+
+def test_refresh_external_state_replaces_cutoffs():
+    r = RiskManager(RiskConfig())
+    r.cutoff_trader("0xa", "internal")
+    r.cutoff_trader("0xb", "internal")
+    assert r.trader_is_cutoff("0xa") and r.trader_is_cutoff("0xb")
+
+    # External state has only 0xa (under a new reason) and adds 0xc.
+    r.refresh_external_state(
+        global_halt_reason=None,
+        cutoffs={"0xA": "operator", "0xc": "operator"},
+    )
+    assert r.trader_is_cutoff("0xa")
+    assert not r.trader_is_cutoff("0xb")  # removed externally
+    assert r.trader_is_cutoff("0xc")  # added externally
+    assert r.cutoffs()["0xa"] == "operator"  # reason updated; wallet lowercased
+
+
 def test_deny_on_trader_cutoff():
     r = RiskManager(RiskConfig())
     r.cutoff_trader("0xbad", "test")
