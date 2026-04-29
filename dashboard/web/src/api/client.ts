@@ -62,7 +62,20 @@ export const api = {
     }),
   clearExecutionMode: () =>
     request<ExecutionMode>("/api/execution_mode", { method: "DELETE" }),
+  replay: (file?: string) =>
+    request<ReplayResult>("/api/replay", {
+      method: "POST",
+      body: JSON.stringify(file ? { file } : {}),
+    }),
+  config: () => request<Record<string, unknown>>("/api/config"),
 };
+
+export interface ReplayResult {
+  file: string;
+  total_events: number;
+  counts: Record<string, number>;
+  reject_reasons: Record<string, number>;
+}
 
 export interface ExecutionMode {
   effective: "paper" | "live";
