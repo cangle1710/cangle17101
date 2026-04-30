@@ -41,7 +41,10 @@ def _bot_dry_run(settings: Settings) -> Optional[bool]:
 
 def _read_override_sync(db_path: str) -> Optional[str]:
     import sqlite3
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return None
     try:
         row = conn.execute(
             "SELECT value FROM kv_state WHERE key='execution_mode'"

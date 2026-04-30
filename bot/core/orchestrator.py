@@ -79,6 +79,7 @@ class Orchestrator:
         self._aggregator = aggregator
         self._adverse_selection = adverse_selection
         self._running = False
+        self._tasks: list[asyncio.Task] = []
 
         # Cache of recent "sell" signals per (wallet, token) so the exit
         # loop can mirror trader exits even if they arrive between polls.
@@ -113,22 +114,25 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             log.exception("stuck-signal recovery scan failed")
 
-        tasks = [
+        self._tasks = [
             asyncio.create_task(self._entry_loop(), name="entry_loop"),
             asyncio.create_task(self._exit_loop(), name="exit_loop"),
             asyncio.create_task(self._maintenance_loop(), name="maintenance_loop"),
         ]
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
             pass
         finally:
-            for t in tasks:
+            for t in self._tasks:
                 t.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
     def stop(self) -> None:
         self._running = False
         self._tracker.stop()
+        for t in self._tasks:
+            t.cancel()
 
     # ----------------- ENTRY LOOP -----------------
 
@@ -182,11 +186,43 @@ class Orchestrator:
             )
             return
 
-        # 3. Book snapshot (required by filter + sizer).
+        # 3. Book snapshot (required by filter + sizer; also used in blind-copy
+        #    to get a live reference price for execution).
         try:
             book = await self._clob.order_book(signal.token_id)
         except ClobError as e:
             self._reject(signal, "no_book", error=str(e))
+            return
+
+        # Blind-copy mode: skip filter, sizer, and risk — execute a fixed
+        # USDC notional directly at the trader's price.
+        if self._cfg.blind_copy.enabled:
+            usdc = self._cfg.blind_copy.fixed_usdc_per_trade
+            shares = round(usdc / signal.price, 6) if signal.price > 0 else 0
+            if shares <= 0:
+                self._reject(signal, "blind_copy_zero_shares", price=signal.price)
+                return
+            log.info(
+                "blind_copy: executing %.2f USDC (%.4f shares) @ %.4f for %s",
+                usdc, shares, signal.price, signal.token_id,
+            )
+            result = await self._execution.execute(
+                signal, target_shares=shares, target_price=signal.price,
+            )
+            for o in result.orders:
+                await self._store.upsert_order(o)
+            if not result.any_filled:
+                self._reject(signal, f"exec_{result.reason or result.status.value}",
+                             attempts=result.attempts)
+                return
+            await self._portfolio.open_from_signal(
+                signal, entry_price=result.avg_price, size=result.filled_size,
+            )
+            self._decisions.record(
+                "blind_copy",
+                wallet=signal.wallet, token_id=signal.token_id,
+                usdc=usdc, shares=result.filled_size, price=result.avg_price,
+            )
             return
 
         # 4. Filter.

@@ -314,6 +314,23 @@ class DemoConfig:
 
 
 @dataclass
+class BlindCopyConfig:
+    """Bypass all filter/sizer/risk logic and blindly mirror every BUY trade.
+
+    When enabled, the bot skips the signal filter, Kelly sizer, and risk
+    manager entirely. Every BUY from a tracked wallet is executed immediately
+    at a fixed USDC amount. Useful for testing the pipeline or deliberate
+    high-risk strategies. Only affects entry; exits still run normally.
+    """
+    enabled: bool = False
+    # Fixed USDC notional to spend per copied trade.
+    fixed_usdc_per_trade: float = 10.0
+
+    def __post_init__(self):
+        _check_positive("blind_copy.fixed_usdc_per_trade", self.fixed_usdc_per_trade)
+
+
+@dataclass
 class BotConfig:
     tracker: TrackerConfig
     filter: FilterConfig
@@ -330,6 +347,7 @@ class BotConfig:
     aggregation: AggregationConfig = field(default_factory=AggregationConfig)
     adverse_selection: AdverseSelectionConfig = field(default_factory=AdverseSelectionConfig)
     demo: DemoConfig = field(default_factory=DemoConfig)
+    blind_copy: BlindCopyConfig = field(default_factory=BlindCopyConfig)
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -368,10 +386,11 @@ def load_config(path: str | Path) -> BotConfig:
         logging=_build(raw.get("logging"), LoggingConfig),
         data=_build(raw.get("data"), DataConfig),
         demo=DemoConfig(**demo_raw),
+        blind_copy=_build(raw.get("blind_copy"), BlindCopyConfig),
         extras={k: v for k, v in raw.items() if k not in {
             "tracker", "filter", "sizing", "risk", "execution",
             "exit", "bankroll", "logging", "data", "observability", "safety",
-            "scoring", "aggregation", "adverse_selection", "demo",
+            "scoring", "aggregation", "adverse_selection", "demo", "blind_copy",
         }},
     )
 

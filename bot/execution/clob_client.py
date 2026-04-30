@@ -112,7 +112,10 @@ class ClobClient:
         if token_id in self._demo_books:
             return self._demo_books[token_id]
         url = f"{self._cfg.clob_base_url.rstrip('/')}/book"
-        payload = await self._http.get_json(url, params={"token_id": token_id})
+        try:
+            payload = await self._http.get_json(url, params={"token_id": token_id})
+        except Exception as exc:
+            raise ClobError(f"order_book fetch failed for {token_id}: {exc}") from exc
         return _parse_book(payload, token_id)
 
     async def midpoint(self, token_id: str) -> Optional[float]:

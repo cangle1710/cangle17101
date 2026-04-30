@@ -70,7 +70,13 @@ def get_bot_db(request: Request) -> Iterator[sqlite3.Connection]:
     connection per request — these are cheap and avoid sharing a cursor
     across the asyncio event loop's worker threads."""
     settings = request.app.state.settings
-    conn = open_bot_db(settings.bot_db_path, read_only=True)
+    try:
+        conn = open_bot_db(settings.bot_db_path, read_only=True)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="bot database not available yet; start the bot first",
+        )
     try:
         yield conn
     finally:

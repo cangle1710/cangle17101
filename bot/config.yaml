@@ -9,8 +9,9 @@ tracker:
   # Popular public "proxy" wallets for top traders can be sourced from
   # polymarket analytics dashboards.
   wallets:
-    - "0x0000000000000000000000000000000000000001"
-    - "0x0000000000000000000000000000000000000002"
+    - "0x63d43bbb87f85af03b8f2f9e2fad7b54334fa2f1"  # wokerjoesleeper - esports/politics $1k-17k
+    - "0x204f72f35326db932158cba6adff0b9a1da95e14"  # sports (soccer/tennis) ~50 trades/day
+    - "0xabce9e07e2bad654fc422b5187ad3b91a9a72f87"  # BTC short-term direction trader
   poll_interval_seconds: 2.0
   data_api_base: "https://data-api.polymarket.com"
   max_trade_age_seconds: 30.0
@@ -108,6 +109,10 @@ adverse_selection:
 # fake TradeSignals at the configured rate and ClobClient serves
 # synthetic order books for the listed token_ids. Combine with
 # execution.dry_run=true (the default) for a fully offline pipeline.
+blind_copy:
+  enabled: false          # set true to skip all filter/sizer/risk logic
+  fixed_usdc_per_trade: 10.0  # flat USDC amount to spend on every copied trade
+
 demo:
   enabled: false           # flip to true to run the bot fully offline
   signals_per_minute: 30.0
